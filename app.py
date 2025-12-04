@@ -3,7 +3,7 @@ import pandas as pd
 from dataclasses import dataclass
 from typing import Tuple
 
-# Import our structure-based lineup builder (builder.py must exist in the repo)
+# Import from builder.py (must be in same repo)
 from builder import (
     build_template_from_params,
     build_optimal_lineup,
@@ -18,33 +18,29 @@ st.set_page_config(page_title="DK Lineup Teacher & Builder", layout="wide")
 # DraftKings NBA-style slots – tweak for other sports if needed
 POS_SLOTS = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
 
-# Ownership buckets (keep these simple & fixed; must match builder.py)
+# Ownership buckets (must match builder.py)
 MEGA_CHALK_THR = 0.40  # >= 40%
 CHALK_THR = 0.30       # 30–39%
 PUNT_THR = 0.10        # < 10%
 
 
 # ---------------------------------------------------------
-# STRUCTURE RULES (contest styles, for classifying users)
+# STRUCTURE RULES (for classifying user styles)
 # ---------------------------------------------------------
 @dataclass
 class StructureRule:
-    contest_type: str           # "CASH", "SE_SMALL", "SE_BIG", "3MAX", "MME"
-    roster_size: int            # usually 8 or 9
+    contest_type: str
+    roster_size: int
     mega_range: Tuple[int, int]
     chalk_range: Tuple[int, int]
     mid_range: Tuple[int, int]
     punt_range: Tuple[int, int]
 
 
-def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int = None) -> StructureRule:
-    """
-    Return a StructureRule with reasonable bucket ranges based on contest type.
-    Used to classify a user's average lineup style.
-    """
+def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int | None = None) -> StructureRule:
+    """Return a StructureRule for a given contest type."""
     ct = contest_type.upper()
 
-    # CASH: very chalky, minimal punts
     if ct == "CASH":
         return StructureRule(
             contest_type="CASH",
@@ -55,10 +51,8 @@ def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int 
             punt_range=(0, 1),
         )
 
-    # SE: split small vs big field
     if ct == "SE":
         if field_size is not None and field_size >= 5000:
-            # Bigger SE – more leverage
             return StructureRule(
                 contest_type="SE_BIG",
                 roster_size=roster_size,
@@ -68,7 +62,6 @@ def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int 
                 punt_range=(1, 2),
             )
         else:
-            # Small/mid SE – chalky with 0–1 punt
             return StructureRule(
                 contest_type="SE_SMALL",
                 roster_size=roster_size,
@@ -78,7 +71,6 @@ def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int 
                 punt_range=(0, 1),
             )
 
-    # 3MAX: slightly spicier SE
     if ct == "3MAX":
         return StructureRule(
             contest_type="3MAX",
@@ -89,7 +81,6 @@ def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int 
             punt_range=(1, 2),
         )
 
-    # MME: per-lineup structure, more punts allowed
     if ct == "MME":
         return StructureRule(
             contest_type="MME",
@@ -100,7 +91,7 @@ def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int 
             punt_range=(1, 3),
         )
 
-    # Default fallback (balanced GPP)
+    # Fallback generic GPP
     return StructureRule(
         contest_type="GENERIC_GPP",
         roster_size=roster_size,
@@ -118,33 +109,29 @@ def classify_user_style(
     avg_punt: float,
     roster_size: int = 8,
 ) -> Tuple[str, float]:
-    """
-    Given a user's average bucket counts, see which contest style they are closest to.
-    Returns (best_style_name, distance_score).
-    """
+    """Find which contest style a user's lineup structure is closest to."""
     styles = [
         get_structure_rule("CASH", roster_size),
-        get_structure_rule("SE", roster_size, field_size=1000),   # treat as small SE
-        get_structure_rule("SE", roster_size, field_size=10000),  # big SE
+        get_structure_rule("SE", roster_size, field_size=1000),
+        get_structure_rule("SE", roster_size, field_size=10000),
         get_structure_rule("3MAX", roster_size),
         get_structure_rule("MME", roster_size),
     ]
 
-    best_name = None
+    best_name = "UNKNOWN"
     best_dist = float("inf")
 
     for rule in styles:
-        # Compare average counts to midpoint of each range
         mega_mid = (rule.mega_range[0] + rule.mega_range[1]) / 2
         chalk_mid = (rule.chalk_range[0] + rule.chalk_range[1]) / 2
         mid_mid = (rule.mid_range[0] + rule.mid_range[1]) / 2
         punt_mid = (rule.punt_range[0] + rule.punt_range[1]) / 2
 
         dist = (
-            (avg_mega - mega_mid) ** 2 +
-            (avg_chalk - chalk_mid) ** 2 +
-            (avg_mid - mid_mid) ** 2 +
-            (avg_punt - punt_mid) ** 2
+            (avg_mega - mega_mid) ** 2
+            + (avg_chalk - chalk_mid) ** 2
+            + (avg_mid - mid_mid) ** 2
+            + (avg_punt - punt_mid) ** 2
         ) ** 0.5
 
         if dist < best_dist:
@@ -155,7 +142,7 @@ def classify_user_style(
 
 
 # ---------------------------------------------------------
-# HELPER FUNCTIONS FOR CONTEST CSV
+# HELPERS FOR CONTEST CSV
 # ---------------------------------------------------------
 def extract_username(entry_name: str) -> str:
     """DK EntryName 'youdacao (5/150)' -> 'youdacao'."""
@@ -168,14 +155,16 @@ def extract_username(entry_name: str) -> str:
 
 
 def parse_lineup_string(lineup: str):
-    """Parse DK 'Lineup' string into list of {pos_slot, player_name}."""
+    """
+    Parse DK 'Lineup' string into list of {pos_slot, player_name}.
+    Example: 'PG Luka Doncic SG ...'
+    """
     if pd.isna(lineup):
         return []
 
     tokens = str(lineup).split()
     players = []
     i = 0
-
     while i < len(tokens):
         tok = tokens[i]
         if tok in POS_SLOTS:
@@ -190,16 +179,16 @@ def parse_lineup_string(lineup: str):
                 players.append({"pos_slot": pos, "player_name": player_name})
         else:
             i += 1
-
     return players
 
 
 def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Turn raw DK standings CSV into one-row-per-lineup-per-player."""
+    """
+    Turn raw DK standings CSV into one-row-per-lineup-per-player.
+    """
     df = df_raw.copy()
 
-    # Normalize column names
-    rename_map = {}
+    rename_map: dict[str, str] = {}
     if "EntryId" in df.columns:
         rename_map["EntryId"] = "entry_id"
     if "Entry ID" in df.columns:
@@ -222,7 +211,7 @@ def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     required = ["entry_id", "entry_name", "rank", "points", "lineup"]
     missing = [c for c in required if c not in df.columns]
     if missing:
-        st.error(f"CSV is missing required columns: {missing}")
+        st.error(f"Contest CSV is missing required columns: {missing}")
         st.stop()
 
     df["username"] = df["entry_name"].apply(extract_username)
@@ -238,15 +227,17 @@ def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 
         players = parse_lineup_string(lineup_str)
         for p in players:
-            records.append({
-                "entry_id": entry_id,
-                "username": username,
-                "rank": rank,
-                "points": points,
-                "total_salary": total_salary,
-                "pos_slot": p["pos_slot"],
-                "player_name": p["player_name"]
-            })
+            records.append(
+                {
+                    "entry_id": entry_id,
+                    "username": username,
+                    "rank": rank,
+                    "points": points,
+                    "total_salary": total_salary,
+                    "pos_slot": p["pos_slot"],
+                    "player_name": p["player_name"],
+                }
+            )
 
     long_df = pd.DataFrame.from_records(records)
     long_df = long_df.dropna(subset=["player_name"])
@@ -256,14 +247,12 @@ def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 def add_field_ownership(long_df: pd.DataFrame) -> pd.DataFrame:
     """Compute field ownership for each player in this contest."""
     total_entries = long_df["entry_id"].nunique()
-
     own = (
         long_df.groupby("player_name")["entry_id"]
         .nunique()
         .reset_index(name="lineups_with_player")
     )
     own["field_own"] = own["lineups_with_player"] / total_entries
-
     merged = long_df.merge(own[["player_name", "field_own"]], on="player_name", how="left")
     return merged
 
@@ -274,21 +263,21 @@ def build_lineup_features(long_df: pd.DataFrame) -> pd.DataFrame:
     - avg_own, sum_own, max_own, min_own
     - counts of mega-chalk, chalk, mid, and punt plays
     """
-    def count_mega_chalk(s):
+
+    def count_mega(s: pd.Series) -> int:
         return (s >= MEGA_CHALK_THR).sum()
 
-    def count_chalk(s):
+    def count_chalk(s: pd.Series) -> int:
         return ((s >= CHALK_THR) & (s < MEGA_CHALK_THR)).sum()
 
-    def count_mid(s):
+    def count_mid(s: pd.Series) -> int:
         return ((s >= PUNT_THR) & (s < CHALK_THR)).sum()
 
-    def count_punt(s):
+    def count_punt(s: pd.Series) -> int:
         return (s < PUNT_THR).sum()
 
     grouped = (
-        long_df
-        .groupby(["entry_id", "username"])
+        long_df.groupby(["entry_id", "username"])
         .agg(
             rank=("rank", "first"),
             points=("points", "first"),
@@ -298,7 +287,7 @@ def build_lineup_features(long_df: pd.DataFrame) -> pd.DataFrame:
             max_own=("field_own", "max"),
             min_own=("field_own", "min"),
             n_players=("player_name", "nunique"),
-            n_mega_chalk=("field_own", count_mega_chalk),
+            n_mega_chalk=("field_own", count_mega),
             n_chalk=("field_own", count_chalk),
             n_mid=("field_own", count_mid),
             n_punt=("field_own", count_punt),
@@ -306,15 +295,14 @@ def build_lineup_features(long_df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
         .sort_values("rank")
     )
-
     return grouped
 
 
-def get_lineup_detail(long_df: pd.DataFrame, entry_id):
+def get_lineup_detail(long_df: pd.DataFrame, entry_id) -> pd.DataFrame:
     """Show a single lineup's players, positions, and field ownership."""
     detail = long_df[long_df["entry_id"] == entry_id].copy()
     detail = detail.sort_values("pos_slot")
-    detail["field_own"] = (detail["field_own"] * 100).map("{:.1f}%".format)
+    detail["field_own"] = (detail["field_own"] * 100.0).map("{:.1f}%".format)
     return detail[["pos_slot", "player_name", "field_own"]]
 
 
@@ -322,27 +310,25 @@ def build_user_matrix(long_df: pd.DataFrame, username: str) -> pd.DataFrame:
     """
     For a given user:
     - each row = one lineup
-    - columns = positions (PG, SG, etc.)
+    - columns = positions
     - cells = player names
-    plus rank & points.
     """
     user_long = long_df[long_df["username"] == username].copy()
     if user_long.empty:
         return pd.DataFrame()
 
-    user_matrix = (
-        user_long
-        .pivot_table(
+    mat = (
+        user_long.pivot_table(
             index=["entry_id", "rank", "points"],
             columns="pos_slot",
             values="player_name",
-            aggfunc="first"
+            aggfunc="first",
         )
         .reset_index()
         .sort_values("rank")
     )
-    user_matrix.columns.name = None
-    return user_matrix
+    mat.columns.name = None
+    return mat
 
 
 # ---------------------------------------------------------
@@ -352,17 +338,16 @@ def load_slate_players_from_upload(uploaded_file) -> pd.DataFrame:
     """
     Load current slate player pool from uploaded CSV.
 
-    Expected columns (flexible names):
+    Required (flexible names):
     - player_id
     - name / Name
     - salary / Salary
-    - proj / Projection
+    - proj / Projection / Proj
     - own_proj / Own
-    - optional: Team, Opp, Game, Pos / Positions
     """
     df = pd.read_csv(uploaded_file)
 
-    rename_map = {}
+    rename_map: dict[str, str] = {}
     if "Name" in df.columns:
         rename_map["Name"] = "name"
     if "Salary" in df.columns:
@@ -388,19 +373,16 @@ def load_slate_players_from_upload(uploaded_file) -> pd.DataFrame:
         st.error(f"Slate / projections CSV is missing required columns: {missing}")
         st.stop()
 
-    # Bucket each player by ownership (using same thresholds as the app)
     def bucket_from_own(own: float) -> str:
         if own >= MEGA_CHALK_THR:
             return "mega"
-        elif own >= CHALK_THR:
+        if own >= CHALK_THR:
             return "chalk"
-        elif own >= PUNT_THR:
+        if own >= PUNT_THR:
             return "mid"
-        else:
-            return "punt"
+        return "punt"
 
     df["bucket"] = df["own_proj"].apply(bucket_from_own)
-
     return df
 
 
@@ -413,7 +395,7 @@ st.markdown(
     """
 Upload:
 1. A **DraftKings results CSV** (standings export) to study what won.  
-2. (Optional) A **slate + projections CSV** (player pool) to build sample lineups
+2. A **slate + projections CSV** (player pool) to build sample lineups
    that match the right ownership structure for your contest type.
 
 Supports:
@@ -422,26 +404,36 @@ Supports:
 """
 )
 
-uploaded_file = st.file_uploader("Step 1 – Upload a DraftKings contest CSV", type=["csv"], key="contest_csv")
+uploaded_file = st.file_uploader(
+    "Step 1 – Upload a DraftKings contest CSV",
+    type=["csv"],
+    key="contest_csv",
+)
 
-if not uploaded_file:
-    st.info("Upload a DK contest CSV to unlock the contest analysis tabs.")
+if uploaded_file is None:
     long_df = None
     lineup_summary = None
+    st.info("Upload a DK contest CSV to unlock the contest analysis tabs.")
 else:
     df_raw = pd.read_csv(uploaded_file)
     long_df = build_long_df(df_raw)
     long_df = add_field_ownership(long_df)
     lineup_summary = build_lineup_features(long_df)
-
     if lineup_summary.empty:
-        st.error("No lineups parsed. Double-check that the CSV has a DK-style 'Lineup' column.")
+        st.error("No lineups parsed. Check that the CSV has a DK-style 'Lineup' column.")
         long_df = None
         lineup_summary = None
 
-# Tabs – contest analysis requires contest CSV, slate/builder tab can work independently
+# Tabs: contest analysis (needs CSV), slate/builder can work with just slate CSV
 tab_overview, tab_slate, tab_patterns, tab_players, tab_users, tab_teach = st.tabs(
-    ["1️⃣ Contest Overview", "2️⃣ Slate & Builder", "3️⃣ Winners vs Everyone", "4️⃣ Players", "5️⃣ User Explorer", "6️⃣ Plain-English Summary"]
+    [
+        "1️⃣ Contest Overview",
+        "2️⃣ Slate & Builder",
+        "3️⃣ Winners vs Everyone",
+        "4️⃣ Players",
+        "5️⃣ User Explorer",
+        "6️⃣ Plain-English Summary",
+    ]
 )
 
 # -------------------------------------------------
@@ -453,7 +445,6 @@ with tab_overview:
     if lineup_summary is None:
         st.info("Upload a DK contest CSV above to see the contest overview.")
     else:
-        # Sidebar settings only make sense when we have lineup_summary
         st.sidebar.header("Contest Settings")
 
         total_entries = lineup_summary.shape[0]
@@ -463,25 +454,25 @@ with tab_overview:
             max_value=20,
             value=5,
             step=1,
-            help="Example: 5% in a 10,000 entry contest = top 500 lineups."
         )
 
         top_cut_rank = max(1, int(total_entries * (top_pct / 100.0)))
         lineup_summary["is_top"] = lineup_summary["rank"] <= top_cut_rank
 
-        top_entry_ids = set(lineup_summary[lineup_summary["is_top"]]["entry_id"])
+        top_entry_ids = set(
+            lineup_summary[lineup_summary["is_top"]]["entry_id"].tolist()
+        )
         long_df["is_top"] = long_df["entry_id"].isin(top_entry_ids)
 
         st.sidebar.markdown(f"**Top cutoff rank:** {top_cut_rank} / {total_entries}")
-
         st.sidebar.markdown("---")
         st.sidebar.markdown("**Ownership tiers (fixed):**")
         st.sidebar.markdown(
             f"""
-- Mega chalk: **≥ {int(MEGA_CHALK_THR*100)}%**  
-- Chalk: **{int(CHALK_THR*100)}–{int(MEGA_CHALK_THR*100)-1}%**  
-- Mid-owned: **{int(PUNT_THR*100)}–{int(CHALK_THR*100)-1}%**  
-- Punt / low-owned: **< {int(PUNT_THR*100)}%**
+- Mega chalk: **≥ {int(MEGA_CHALK_THR * 100)}%**  
+- Chalk: **{int(CHALK_THR * 100)}–{int(MEGA_CHALK_THR * 100) - 1}%**  
+- Mid-owned: **{int(PUNT_THR * 100)}–{int(CHALK_THR * 100) - 1}%**  
+- Punt / low-owned: **< {int(PUNT_THR * 100)}%**
 """
         )
 
@@ -490,54 +481,63 @@ with tab_overview:
         st.sidebar.markdown(
             """
 **150-max GPP (big fields):**
-
 - Often **1–3 mega chalk** pieces  
 - **2–4 chalk / mid** plays  
 - **1–3 punts** for leverage  
 
 **Single-entry / 3-max:**
-
 - Often **1–2 mega chalk**  
 - Fewer wild punts (0–1)  
 - More balanced overall
 """
         )
 
-        # Precompute top vs rest for other tabs; store in session_state for reuse
+        # Save to session for other tabs
         st.session_state["top_pct"] = top_pct
         st.session_state["top_cut_rank"] = top_cut_rank
         st.session_state["lineup_summary"] = lineup_summary
         st.session_state["long_df"] = long_df
 
-        top_df = lineup_summary[lineup_summary["is_top"]]
-        rest_df = lineup_summary[~lineup_summary["is_top"]]
+        top_df = lineup_summary[lineup_summary["is_top"]].copy()
+        rest_df = lineup_summary[~lineup_summary["is_top"]].copy()
         st.session_state["top_df"] = top_df
         st.session_state["rest_df"] = rest_df
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total entries", total_entries)
-col2.metric("Winners (top group)", top_df.shape[0])
-col3.metric("Median points (all)", f"{lineup_summary['points'].median():.2f}")
-col4.metric("Median avg ownership (all)", f"{lineup_summary['avg_own'].median():.2%}")
-
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total entries", total_entries)
+        col2.metric("Winners (top group)", top_df.shape[0])
+        col3.metric(
+            "Median points (all)",
+            f"{lineup_summary['points'].median():.2f}",
+        )
+        col4.metric(
+            "Median avg ownership (all)",
+            f"{lineup_summary['avg_own'].median():.2%}",
+        )
 
         simple_cols = ["rank", "entry_id", "username", "points", "avg_own", "is_top"]
-        renamed = lineup_summary[simple_cols].rename(columns={
-            "rank": "Rank",
-            "entry_id": "Entry ID",
-            "username": "User",
-            "points": "Points",
-            "avg_own": "Avg player ownership",
-            "is_top": f"Winner? (Top {top_pct}%)"
-        })
-        renamed["Avg player ownership"] = renamed["Avg player ownership"].map(lambda x: f"{x:.1%}")
+        renamed = lineup_summary[simple_cols].rename(
+            columns={
+                "rank": "Rank",
+                "entry_id": "Entry ID",
+                "username": "User",
+                "points": "Points",
+                "avg_own": "Avg player ownership",
+                "is_top": f"Winner? (Top {top_pct}%)",
+            }
+        )
+        renamed["Avg player ownership"] = renamed["Avg player ownership"].map(
+            lambda x: f"{x:.1%}"
+        )
         st.dataframe(renamed, use_container_width=True)
 
         with st.expander("Show advanced lineup stats"):
             st.dataframe(lineup_summary, use_container_width=True)
 
         st.subheader("Visual: Rank vs Avg Ownership")
-        st.caption("Each dot is a lineup. Left = better finish. Up/down = more/less chalky on average.")
+        st.caption(
+            "Each dot is a lineup. Left = better finish. Up/down = more/less chalky on average."
+        )
         st.scatter_chart(lineup_summary, x="rank", y="avg_own")
 
 
@@ -555,8 +555,8 @@ Expected columns (names can vary, we normalize):
 - `player_id`
 - `Name` or `name`
 - `Salary` or `salary`
-- `Projection` or `proj`
-- `Own` or `own_proj` (ownership projection as a fraction, e.g. 0.25 for 25%)
+- `Projection` / `Proj` / `proj`
+- `Own` or `own_proj` (fraction: 0.25 = 25%)
 
 For **showdown**, just upload a single row per player (base version).  
 The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internally.
@@ -566,7 +566,7 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
     slate_file = st.file_uploader(
         "Upload slate + projections CSV (player pool)",
         type=["csv"],
-        key="slate_upload"
+        key="slate_upload",
     )
 
     if slate_file is None:
@@ -574,25 +574,25 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
     else:
         slate_df = load_slate_players_from_upload(slate_file)
 
-        # Choose classic vs showdown
         slate_mode = st.radio(
             "Slate format",
             ["Classic (8-player DK)", "Showdown (1 CPT + 5 FLEX)"],
             index=0,
-            help="Showdown uses 1 CPT at 1.5x salary/points + 5 FLEX under $50k."
         )
 
         st.markdown("### Player pool (base data)")
-        df_show_display = slate_df.copy()
-        df_show_display["own_proj"] = df_show_display["own_proj"].map(lambda x: f"{x:.1%}")
-        df_show_display = df_show_display.rename(columns={
-            "name": "Player",
-            "salary": "Salary",
-            "proj": "Proj",
-            "own_proj": "Own %",
-            "bucket": "Bucket"
-        })
-        st.dataframe(df_show_display, use_container_width=True)
+        player_view = slate_df.copy()
+        player_view["own_proj"] = player_view["own_proj"].map(lambda x: f"{x:.1%}")
+        player_view = player_view.rename(
+            columns={
+                "name": "Player",
+                "salary": "Salary",
+                "proj": "Proj",
+                "own_proj": "Own %",
+                "bucket": "Bucket",
+            }
+        )
+        st.dataframe(player_view, use_container_width=True)
 
         st.markdown("### Build an example lineup based on contest parameters")
 
@@ -601,17 +601,15 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
             contest_type = st.selectbox(
                 "Contest type",
                 ["CASH", "SE", "3MAX", "MME"],
-                index=1,  # default SE
-                help="Controls how aggressive the lineup structure is."
+                index=1,
             )
-
         with col_b:
             field_size = st.number_input(
-                "Contest size (number of entries)",
+                "Contest size (entries)",
                 min_value=10,
                 max_value=500000,
                 value=2000,
-                step=10
+                step=10,
             )
 
         pct_to_first = st.slider(
@@ -620,7 +618,6 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
             max_value=40,
             value=25,
             step=1,
-            help="Higher = more top-heavy payout = you need more leverage."
         )
 
         bucket_slack = st.slider(
@@ -629,24 +626,22 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
             max_value=2,
             value=1,
             step=1,
-            help="0 = strict bucket counts, 2 = more flexible."
         )
 
         if st.button("Build sample lineup"):
-            # Classic vs Showdown switch
             if "Showdown" in slate_mode:
-                # Showdown: 6 total players, $50k cap
                 template = build_template_from_params(
                     contest_type=contest_type,
                     field_size=field_size,
                     pct_to_first=pct_to_first,
-                    roster_size=6,          # 1 CPT + 5 FLEX
-                    salary_cap=50000        # DK showdown cap
+                    roster_size=6,      # 1 CPT + 5 FLEX
+                    salary_cap=50000,
                 )
-
-                st.write(f"Using structure profile: **{template.contest_label}** (Showdown, 6 players)")
                 st.write(
-                    f"Target bucket counts per lineup (approx): "
+                    f"Using structure profile: **{template.contest_label}** (Showdown, 6 players)"
+                )
+                st.write(
+                    "Target bucket counts (approx): "
                     f"mega={template.target_mega:.1f}, "
                     f"chalk={template.target_chalk:.1f}, "
                     f"mid={template.target_mid:.1f}, "
@@ -659,18 +654,18 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
                     bucket_slack=bucket_slack,
                 )
             else:
-                # Classic: 8 players, $50k cap
                 template = build_template_from_params(
                     contest_type=contest_type,
                     field_size=field_size,
                     pct_to_first=pct_to_first,
-                    roster_size=8,          # classic DK
-                    salary_cap=50000        # DK classic cap
+                    roster_size=8,
+                    salary_cap=50000,
                 )
-
-                st.write(f"Using structure profile: **{template.contest_label}** (Classic, 8 players)")
                 st.write(
-                    f"Target bucket counts per lineup (approx): "
+                    f"Using structure profile: **{template.contest_label}** (Classic, 8 players)"
+                )
+                st.write(
+                    "Target bucket counts (approx): "
                     f"mega={template.target_mega:.1f}, "
                     f"chalk={template.target_chalk:.1f}, "
                     f"mid={template.target_mid:.1f}, "
@@ -684,19 +679,29 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
                 )
 
             if lineup is None or lineup.empty:
-                st.error("Could not find a valid lineup with these constraints. Try increasing slack or changing parameters.")
+                st.error(
+                    "Could not find a valid lineup with these constraints. "
+                    "Try increasing bucket slack or adjusting contest parameters."
+                )
             else:
                 show = lineup[["name", "salary", "proj", "own_proj"]].copy()
                 if "role" in lineup.columns:
                     show["role"] = lineup["role"]
                 show["own_proj"] = show["own_proj"].map(lambda x: f"{x:.1%}")
-                cols_order = ["name", "role", "salary", "proj", "own_proj"] if "role" in show.columns else ["name", "salary", "proj", "own_proj"]
-                show = show.rename(columns={
-                    "name": "Player",
-                    "salary": "Salary",
-                    "proj": "Proj",
-                    "own_proj": "Own %"
-                })[cols_order]
+
+                cols = (
+                    ["name", "role", "salary", "proj", "own_proj"]
+                    if "role" in show.columns
+                    else ["name", "salary", "proj", "own_proj"]
+                )
+                show = show.rename(
+                    columns={
+                        "name": "Player",
+                        "salary": "Salary",
+                        "proj": "Proj",
+                        "own_proj": "Own %",
+                    }
+                )[cols]
 
                 st.subheader("Sample lineup")
                 st.dataframe(show, use_container_width=True)
@@ -706,7 +711,7 @@ The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internall
                 st.write(f"**Total salary:** {total_salary} / 50000")
                 st.write(f"**Total projection:** {total_proj:.2f} fpts")
                 if "role" in lineup.columns:
-                    st.caption("Showdown lineup: exactly 1 CPT and 5 FLEX enforced.")
+                    st.caption("Showdown: exactly 1 CPT + 5 FLEX enforced.")
 
 
 # -------------------------------------------------
@@ -721,33 +726,41 @@ with tab_patterns:
     top_pct = st.session_state.get("top_pct")
 
     if lineup_summary is None or top_df is None or rest_df is None:
-        st.info("Go to the 'Contest Overview' tab and upload a contest CSV first.")
+        st.info("Go to 'Contest Overview' and upload a contest CSV first.")
     else:
-        def summarize(group, label):
-            return pd.DataFrame({
-                "Group": [label],
-                "Mean Points": [group["points"].mean()],
-                "Median Points": [group["points"].median()],
-                "Avg Player Ownership": [group["avg_own"].mean()],
-                "Total Ownership Sum": [group["sum_own"].mean()],
-                "Max Single-Player Ownership": [group["max_own"].mean()],
-                "Mega Chalk (>=40%) per lineup": [group["n_mega_chalk"].mean()],
-                "Chalk (30–39%) per lineup": [group["n_chalk"].mean()],
-                "Mid (10–29%) per lineup": [group["n_mid"].mean()],
-                "Punts (<10%) per lineup": [group["n_punt"].mean()],
-            })
+        def summarize(group: pd.DataFrame, label: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "Group": [label],
+                    "Mean Points": [group["points"].mean()],
+                    "Median Points": [group["points"].median()],
+                    "Avg Player Ownership": [group["avg_own"].mean()],
+                    "Total Ownership Sum": [group["sum_own"].mean()],
+                    "Max Single-Player Ownership": [group["max_own"].mean()],
+                    "Mega Chalk (>=40%) per lineup": [group["n_mega_chalk"].mean()],
+                    "Chalk (30–39%) per lineup": [group["n_chalk"].mean()],
+                    "Mid (10–29%) per lineup": [group["n_mid"].mean()],
+                    "Punts (<10%) per lineup": [group["n_punt"].mean()],
+                }
+            )
 
         top_stats = summarize(top_df, f"Winners (Top {top_pct}%)")
         rest_stats = summarize(rest_df, "Everyone else")
-        pattern_table = pd.concat([top_stats, rest_stats], ignore_index=True)
+        table = pd.concat([top_stats, rest_stats], ignore_index=True)
 
-        pattern_table["Avg Player Ownership"] = pattern_table["Avg Player Ownership"].map(lambda x: f"{x:.1%}")
-        pattern_table["Max Single-Player Ownership"] = pattern_table["Max Single-Player Ownership"].map(lambda x: f"{x:.1%}")
-        pattern_table["Mean Points"] = pattern_table["Mean Points"].map(lambda x: f"{x:.2f}")
-        pattern_table["Median Points"] = pattern_table["Median Points"].map(lambda x: f"{x:.2f}")
-        pattern_table["Total Ownership Sum"] = pattern_table["Total Ownership Sum"].map(lambda x: f"{x:.2f}")
+        table["Avg Player Ownership"] = table["Avg Player Ownership"].map(
+            lambda x: f"{x:.1%}"
+        )
+        table["Max Single-Player Ownership"] = table["Max Single-Player Ownership"].map(
+            lambda x: f"{x:.1%}"
+        )
+        table["Mean Points"] = table["Mean Points"].map(lambda x: f"{x:.2f}")
+        table["Median Points"] = table["Median Points"].map(lambda x: f"{x:.2f}")
+        table["Total Ownership Sum"] = table["Total Ownership Sum"].map(
+            lambda x: f"{x:.2f}"
+        )
 
-        st.dataframe(pattern_table, use_container_width=True)
+        st.dataframe(table, use_container_width=True)
 
 
 # -------------------------------------------------
@@ -761,14 +774,13 @@ with tab_players:
     rest_df = st.session_state.get("rest_df")
 
     if long_df is None or top_df is None or rest_df is None:
-        st.info("Go to the 'Contest Overview' tab and upload a contest CSV first.")
+        st.info("Go to 'Contest Overview' and upload a contest CSV first.")
     else:
         n_top = top_df["entry_id"].nunique()
         n_rest = rest_df["entry_id"].nunique()
 
         g = (
-            long_df
-            .groupby(["player_name", "is_top"])["entry_id"]
+            long_df.groupby(["player_name", "is_top"])["entry_id"]
             .nunique()
             .unstack(fill_value=0)
             .rename(columns={False: "lineups_rest", True: "lineups_top"})
@@ -778,9 +790,13 @@ with tab_players:
         g["top_own"] = g["lineups_top"] / max(1, n_top)
         g["rest_own"] = g["lineups_rest"] / max(1, n_rest)
 
-        field_own_ref = long_df.groupby("player_name")["field_own"].first().reset_index()
+        field_own_ref = (
+            long_df.groupby("player_name")["field_own"].first().reset_index()
+        )
         player_stats = g.merge(field_own_ref, on="player_name", how="left")
-        player_stats["top_minus_rest"] = player_stats["top_own"] - player_stats["rest_own"]
+        player_stats["top_minus_rest"] = (
+            player_stats["top_own"] - player_stats["rest_own"]
+        )
 
         display_df = player_stats.copy()
         for col in ["field_own", "top_own", "rest_own", "top_minus_rest"]:
@@ -788,10 +804,17 @@ with tab_players:
 
         st.dataframe(
             display_df.sort_values("top_minus_rest", ascending=False)[
-                ["player_name", "field_own", "top_own", "rest_own", "top_minus_rest",
-                 "lineups_top", "lineups_rest"]
+                [
+                    "player_name",
+                    "field_own",
+                    "top_own",
+                    "rest_own",
+                    "top_minus_rest",
+                    "lineups_top",
+                    "lineups_rest",
+                ]
             ].head(40),
-            use_container_width=True
+            use_container_width=True,
         )
 
 
@@ -799,29 +822,38 @@ with tab_players:
 # TAB 5 – User Explorer
 # -------------------------------------------------
 with tab_users:
-    st.subheader("User Explorer – Spy on How a User Built Their Lineups")
+    st.subheader("User Explorer – See How a User Built Their Lineups")
 
     lineup_summary = st.session_state.get("lineup_summary")
     long_df = st.session_state.get("long_df")
     top_pct = st.session_state.get("top_pct")
 
     if lineup_summary is None or long_df is None:
-        st.info("Go to the 'Contest Overview' tab and upload a contest CSV first.")
+        st.info("Go to 'Contest Overview' and upload a contest CSV first.")
     else:
         username_list = sorted(lineup_summary["username"].unique())
         selected_user = st.selectbox("Choose a user", username_list)
 
-        user_group = lineup_summary[lineup_summary["username"] == selected_user].copy()
-        user_group = user_group.sort_values("rank")
+        user_group = (
+            lineup_summary[lineup_summary["username"] == selected_user]
+            .copy()
+            .sort_values("rank")
+        )
 
-        simple_user = user_group[["rank", "entry_id", "points", "avg_own", "is_top"]].rename(columns={
-            "rank": "Rank",
-            "entry_id": "Entry ID",
-            "points": "Points",
-            "avg_own": "Avg player ownership",
-            "is_top": f"Winner? (Top {top_pct}%)"
-        })
-        simple_user["Avg player ownership"] = simple_user["Avg player ownership"].map(lambda x: f"{x:.1%}")
+        simple_user = user_group[
+            ["rank", "entry_id", "points", "avg_own", "is_top"]
+        ].rename(
+            columns={
+                "rank": "Rank",
+                "entry_id": "Entry ID",
+                "points": "Points",
+                "avg_own": "Avg player ownership",
+                "is_top": f"Winner? (Top {top_pct}%)",
+            }
+        )
+        simple_user["Avg player ownership"] = simple_user["Avg player ownership"].map(
+            lambda x: f"{x:.1%}"
+        )
 
         st.markdown(f"**{selected_user}** – {len(user_group)} lineups")
         st.dataframe(simple_user, use_container_width=True)
@@ -834,22 +866,22 @@ with tab_users:
             avg_mega=("n_mega_chalk", "mean"),
             avg_chalk=("n_chalk", "mean"),
             avg_mid=("n_mid", "mean"),
-            avg_punt=("n_punt", "mean")
+            avg_punt=("n_punt", "mean"),
         )
 
         st.markdown(
             f"""
-On average, **{selected_user}** built lineups like this in this contest:
+On average, **{selected_user}** built lineups like this:
 
-- **Avg points per lineup:** `{user_stats['avg_points']:.2f}`  
-- **Avg player ownership:** `{user_stats['avg_avg_own']:.1%}`  
+- Avg points per lineup: **{user_stats['avg_points']:.2f}**  
+- Avg player ownership: **{user_stats['avg_avg_own']:.1%}**
 
-Per lineup, roughly:
+Per lineup (on average):
 
-- **Mega chalk (≥40%):** `{user_stats['avg_mega']:.2f}` players  
-- **Chalk (30–39%):** `{user_stats['avg_chalk']:.2f}` players  
-- **Mid (10–29%):** `{user_stats['avg_mid']:.2f}` players  
-- **Punts (<10%):** `{user_stats['avg_punt']:.2f}` players  
+- Mega chalk (≥40%): **{user_stats['avg_mega']:.2f}** players  
+- Chalk (30–39%): **{user_stats['avg_chalk']:.2f}** players  
+- Mid (10–29%): **{user_stats['avg_mid']:.2f}** players  
+- Punts (<10%): **{user_stats['avg_punt']:.2f}** players  
 """
         )
 
@@ -864,15 +896,15 @@ Per lineup, roughly:
         st.subheader("Lineup style profile")
         st.markdown(
             f"""
-Based on those averages, this user's builds most closely resemble:
+This user's builds most closely resemble:
 
 > **{best_style}**-style lineups (distance score `{dist:.2f}`)
 
-Roughly:
-- **CASH** → super chalky, almost no punts  
+Rough interpretations:
+- **CASH** → very chalky, almost no punts  
 - **SE_SMALL** → chalky shell with maybe 0–1 punts  
 - **SE_BIG** → more leverage, 1–2 punts  
-- **3MAX** → similar to SE but a bit spicier  
+- **3MAX** → in between SE and MME  
 - **MME** → more punts & leverage per lineup
 """
         )
@@ -905,7 +937,7 @@ with tab_teach:
     top_pct = st.session_state.get("top_pct")
 
     if lineup_summary is None or top_df is None or rest_df is None:
-        st.info("Go to the 'Contest Overview' tab and upload a contest CSV first.")
+        st.info("Go to 'Contest Overview' and upload a contest CSV first.")
     else:
         top_mean_avg_own = top_df["avg_own"].mean()
         rest_mean_avg_own = rest_df["avg_own"].mean()
@@ -918,10 +950,10 @@ with tab_teach:
 
         st.markdown(
             f"""
-### 1. How chalky are winning lineups here?
+### 1. How chalky are winning lineups?
 
-- Avg player ownership in **winners** (top {top_pct}%): **{top_mean_avg_own:.1%}**  
-- Avg player ownership in **everyone else**: **{rest_mean_avg_own:.1%}**
+- Avg player ownership in winners (top {top_pct}%): **{top_mean_avg_own:.1%}**  
+- Avg player ownership in everyone else: **{rest_mean_avg_own:.1%}**
 """
         )
 
@@ -929,7 +961,7 @@ with tab_teach:
             f"""
 ### 2. How many chalk vs punts do winners use?
 
-Per lineup, on average:
+Per lineup:
 
 **Winners (top {top_pct}%):**
 - Mega chalk (≥40%): **{top_avg_mega:.2f}**  
@@ -943,18 +975,15 @@ Per lineup, on average:
 
         st.markdown(
             """
-### 3. Turn this into a simple blueprint
+### 3. How to use this with the builder
 
-For similar contests:
+For a similar contest:
 
-1. Decide how many mega-chalk pieces you want in each lineup.  
-2. Decide how many low-owned punts you’re comfortable with.  
-3. Use the **Slate & Builder** tab to build lineups that:
-   - Fit salary,
-   - Maximize projection,
-   - And match that ownership structure.
-
-For showdown, treat CPT as your highest-upside spot:
-- Good CPTs = players who can outscore the field by a lot, not just “safe” points.
+1. Decide how many mega chalk pieces you want.
+2. Decide how many low-owned punts you're comfortable with.
+3. Use the **Slate & Builder** tab to:
+   - Choose contest type (CASH / SE / 3MAX / MME),
+   - Pick Classic or Showdown,
+   - Let the app build a sample lineup that matches that structure.
 """
         )
