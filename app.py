@@ -9,7 +9,6 @@ from builder import (
     build_optimal_lineup,
     build_optimal_lineup_showdown,
 )
-)
 
 # ---------------------------------------------------------
 # CONFIG
