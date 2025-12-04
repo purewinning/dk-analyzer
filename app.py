@@ -3,12 +3,12 @@ import pandas as pd
 from dataclasses import dataclass
 from typing import Tuple
 
+# Import our structure-based lineup builder (builder.py must exist in the repo)
 from builder import (
     build_template_from_params,
     build_optimal_lineup,
     build_optimal_lineup_showdown,
 )
-
 
 # ---------------------------------------------------------
 # CONFIG
@@ -415,6 +415,10 @@ Upload:
 1. A **DraftKings results CSV** (standings export) to study what won.  
 2. (Optional) A **slate + projections CSV** (player pool) to build sample lineups
    that match the right ownership structure for your contest type.
+
+Supports:
+- **Classic**: 8-player DK lineups  
+- **Showdown**: 1 Captain (1.5× points/salary) + 5 FLEX under $50k
 """
 )
 
@@ -514,7 +518,7 @@ with tab_overview:
         col1.metric("Total entries", total_entries)
         col2.metric("Winners (top group)", top_df.shape[0])
         col3.metric("Median points (all)", f"{lineup_summary['points'].median():.2f}")
-        col4.metric("Median avg ownership (all)", f"{lineup_summary['avg_own'].median():.2%}")
+        col4.metric("Median avg ownership (all)", f"{lineup_summary['avg_own"].median():.2%}")
 
         simple_cols = ["rank", "entry_id", "username", "points", "avg_own", "is_top"]
         renamed = lineup_summary[simple_cols].rename(columns={
@@ -552,6 +556,9 @@ Expected columns (names can vary, we normalize):
 - `Salary` or `salary`
 - `Projection` or `proj`
 - `Own` or `own_proj` (ownership projection as a fraction, e.g. 0.25 for 25%)
+
+For **showdown**, just upload a single row per player (base version).  
+The app will create CPT (1.5× salary, 1.5× points) and FLEX versions internally.
 """
     )
 
@@ -566,7 +573,15 @@ Expected columns (names can vary, we normalize):
     else:
         slate_df = load_slate_players_from_upload(slate_file)
 
-        st.markdown("### Player pool (with ownership buckets)")
+        # Choose classic vs showdown
+        slate_mode = st.radio(
+            "Slate format",
+            ["Classic (8-player DK)", "Showdown (1 CPT + 5 FLEX)"],
+            index=0,
+            help="Showdown uses 1 CPT at 1.5x salary/points + 5 FLEX under $50k."
+        )
+
+        st.markdown("### Player pool (base data)")
         df_show_display = slate_df.copy()
         df_show_display["own_proj"] = df_show_display["own_proj"].map(lambda x: f"{x:.1%}")
         df_show_display = df_show_display.rename(columns={
@@ -617,41 +632,70 @@ Expected columns (names can vary, we normalize):
         )
 
         if st.button("Build sample lineup"):
-            template = build_template_from_params(
-                contest_type=contest_type,
-                field_size=field_size,
-                pct_to_first=pct_to_first,
-                roster_size=8,         # change if your sport uses a different size
-                salary_cap=50000       # DK NBA standard cap
-            )
+            # Classic vs Showdown switch
+            if "Showdown" in slate_mode:
+                # Showdown: 6 total players, $50k cap
+                template = build_template_from_params(
+                    contest_type=contest_type,
+                    field_size=field_size,
+                    pct_to_first=pct_to_first,
+                    roster_size=6,          # 1 CPT + 5 FLEX
+                    salary_cap=50000        # DK showdown cap
+                )
 
-            st.write(f"Using structure profile: **{template.contest_label}**")
-            st.write(
-                f"Target bucket counts per lineup (approx): "
-                f"mega={template.target_mega:.1f}, "
-                f"chalk={template.target_chalk:.1f}, "
-                f"mid={template.target_mid:.1f}, "
-                f"punt={template.target_punt:.1f}"
-            )
+                st.write(f"Using structure profile: **{template.contest_label}** (Showdown, 6 players)")
+                st.write(
+                    f"Target bucket counts per lineup (approx): "
+                    f"mega={template.target_mega:.1f}, "
+                    f"chalk={template.target_chalk:.1f}, "
+                    f"mid={template.target_mid:.1f}, "
+                    f"punt={template.target_punt:.1f}"
+                )
 
-            lineup = build_optimal_lineup(
-                slate_df,
-                template=template,
-                bucket_slack=bucket_slack,
-            )
+                lineup = build_optimal_lineup_showdown(
+                    slate_df,
+                    template=template,
+                    bucket_slack=bucket_slack,
+                )
+            else:
+                # Classic: 8 players, $50k cap
+                template = build_template_from_params(
+                    contest_type=contest_type,
+                    field_size=field_size,
+                    pct_to_first=pct_to_first,
+                    roster_size=8,          # classic DK
+                    salary_cap=50000        # DK classic cap
+                )
+
+                st.write(f"Using structure profile: **{template.contest_label}** (Classic, 8 players)")
+                st.write(
+                    f"Target bucket counts per lineup (approx): "
+                    f"mega={template.target_mega:.1f}, "
+                    f"chalk={template.target_chalk:.1f}, "
+                    f"mid={template.target_mid:.1f}, "
+                    f"punt={template.target_punt:.1f}"
+                )
+
+                lineup = build_optimal_lineup(
+                    slate_df,
+                    template=template,
+                    bucket_slack=bucket_slack,
+                )
 
             if lineup is None or lineup.empty:
                 st.error("Could not find a valid lineup with these constraints. Try increasing slack or changing parameters.")
             else:
-                show = lineup[["name", "salary", "proj", "own_proj", "bucket"]].copy()
+                show = lineup[["name", "salary", "proj", "own_proj"]].copy()
+                if "role" in lineup.columns:
+                    show["role"] = lineup["role"]
                 show["own_proj"] = show["own_proj"].map(lambda x: f"{x:.1%}")
+                cols_order = ["name", "role", "salary", "proj", "own_proj"] if "role" in show.columns else ["name", "salary", "proj", "own_proj"]
                 show = show.rename(columns={
                     "name": "Player",
                     "salary": "Salary",
                     "proj": "Proj",
-                    "own_proj": "Own %",
-                    "bucket": "Bucket"
-                })
+                    "own_proj": "Own %"
+                })[cols_order]
 
                 st.subheader("Sample lineup")
                 st.dataframe(show, use_container_width=True)
@@ -660,6 +704,8 @@ Expected columns (names can vary, we normalize):
                 total_proj = float(lineup["proj"].sum())
                 st.write(f"**Total salary:** {total_salary} / 50000")
                 st.write(f"**Total projection:** {total_proj:.2f} fpts")
+                if "role" in lineup.columns:
+                    st.caption("Showdown lineup: exactly 1 CPT and 5 FLEX enforced.")
 
 
 # -------------------------------------------------
@@ -906,5 +952,8 @@ For similar contests:
    - Fit salary,
    - Maximize projection,
    - And match that ownership structure.
+
+For showdown, treat CPT as your highest-upside spot:
+- Good CPTs = players who can outscore the field by a lot, not just “safe” points.
 """
         )
