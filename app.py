@@ -2,18 +2,26 @@ import streamlit as st
 import pandas as pd
 
 # ---------------------------------------------------------
-# App config
+# CONFIG
 # ---------------------------------------------------------
-st.set_page_config(page_title="DK MME Lineup Analyzer", layout="wide")
+st.set_page_config(page_title="DK MME Lineup Analyzer (Simple View)", layout="wide")
 
+# DraftKings NBA-style slots – tweak for other sports if needed
 POS_SLOTS = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
 
+# Ownership buckets (keep these simple & fixed)
+MEGA_CHALK_THR = 0.40  # >= 40%
+CHALK_THR = 0.30       # 30–39%
+PUNT_THR = 0.10        # < 10%
+
 
 # ---------------------------------------------------------
-# Helpers: parsing + features
+# HELPER FUNCTIONS
 # ---------------------------------------------------------
 def extract_username(entry_name: str) -> str:
-    """DraftKings EntryName looks like: 'youdacao (5/150)' -> we just want 'youdacao'."""
+    """
+    DK EntryName looks like: 'youdacao (5/150)' -> we just want 'youdacao'.
+    """
     if pd.isna(entry_name):
         return ""
     s = str(entry_name)
@@ -25,8 +33,8 @@ def extract_username(entry_name: str) -> str:
 def parse_lineup_string(lineup: str):
     """
     Parse DK 'Lineup' string like:
-    'C Goga Bitadze F Anthony Davis G Ryan Nembhard ... UTIL Kel'el Ware'
-    into a list of {pos_slot, player_name}.
+    'C Goga Bitadze F Anthony Davis ... UTIL Stephen Curry'
+    into list of {pos_slot, player_name}.
     """
     if pd.isna(lineup):
         return []
@@ -55,11 +63,11 @@ def parse_lineup_string(lineup: str):
 
 def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Turn the raw DK standings CSV into one-row-per-lineup-per-player.
+    Turn raw DK standings CSV into one-row-per-lineup-per-player.
     """
     df = df_raw.copy()
 
-    # Normalize column names
+    # Normalize column names so we don't have to remember exact DK headings
     rename_map = {}
     if "EntryId" in df.columns:
         rename_map["EntryId"] = "entry_id"
@@ -116,7 +124,7 @@ def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 def add_field_ownership(long_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute field ownership for each player in a single contest.
+    Compute field ownership for each player in this contest.
     """
     total_entries = long_df["entry_id"].nunique()
 
@@ -133,28 +141,22 @@ def add_field_ownership(long_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_lineup_features(long_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build lineup-level features useful for teaching patterns:
-    - avg ownership
-    - sum ownership
-    - max/min ownership
-    - number of mega-chalk, chalk, mid, and punt plays
+    Build lineup-level features:
+    - avg_own, sum_own, max_own, min_own
+    - counts of mega-chalk, chalk, mid, and punt plays
     """
-    # Ownership thresholds (tune these if you want)
-    mega_chalk_thr = 0.40   # >= 40% owned
-    chalk_thr = 0.30        # 30-39%
-    punt_thr = 0.10         # < 10% owned
 
     def count_mega_chalk(s):
-        return (s >= mega_chalk_thr).sum()
+        return (s >= MEGA_CHALK_THR).sum()
 
     def count_chalk(s):
-        return ((s >= chalk_thr) & (s < mega_chalk_thr)).sum()
+        return ((s >= CHALK_THR) & (s < MEGA_CHALK_THR)).sum()
 
     def count_mid(s):
-        return ((s >= punt_thr) & (s < chalk_thr)).sum()
+        return ((s >= PUNT_THR) & (s < CHALK_THR)).sum()
 
     def count_punt(s):
-        return (s < punt_thr).sum()
+        return (s < PUNT_THR).sum()
 
     grouped = (
         long_df
@@ -182,7 +184,7 @@ def build_lineup_features(long_df: pd.DataFrame) -> pd.DataFrame:
 
 def get_lineup_detail(long_df: pd.DataFrame, entry_id):
     """
-    Return the players (with ownership) for a single lineup.
+    Show a single lineup's players, positions, and field ownership.
     """
     detail = long_df[long_df["entry_id"] == entry_id].copy()
     detail = detail.sort_values("pos_slot")
@@ -192,10 +194,10 @@ def get_lineup_detail(long_df: pd.DataFrame, entry_id):
 
 def build_user_matrix(long_df: pd.DataFrame, username: str) -> pd.DataFrame:
     """
-    For a given user, build a matrix:
-    - rows: lineups
-    - columns: positions (PG/SG/…)
-    - values: player names
+    For a given user:
+    - each row = one lineup
+    - columns = positions (PG, SG, etc.)
+    - cells = player names
     plus rank & points.
     """
     user_long = long_df[long_df["username"] == username].copy()
@@ -213,96 +215,127 @@ def build_user_matrix(long_df: pd.DataFrame, username: str) -> pd.DataFrame:
         .reset_index()
         .sort_values("rank")
     )
-
     user_matrix.columns.name = None
     return user_matrix
 
 
 # ---------------------------------------------------------
-# UI
+# MAIN UI
 # ---------------------------------------------------------
-st.title("DraftKings MME Lineup Analyzer & Teaching Tool")
+st.title("DraftKings Lineup Teacher")
 
 st.markdown(
     """
-Upload a **DraftKings tournament CSV** (standings export), and this app will:
+**Goal:** Help you see *what kinds of lineups actually win* in this contest.
 
-- Compute field ownership for every player  
-- Label the **top X% of lineups as "winners"**  
-- Compare **winning lineups vs the field** (ownership, chalk usage, punts)  
-- Let you **inspect any user’s full 150 set** and lineups in matrix form  
-- Show **player ownership in winners vs the rest**  
-- Summarize **what types of lineups are winning in this contest**
+**Simple steps:**
+1. Upload a DraftKings results CSV (standings export).  
+2. Pick what counts as **“top lineups / winners”**.  
+3. Look at how those winners are built vs everyone else.  
+4. Spy on sharp users and copy the patterns (structure, not players).
 """
 )
 
-uploaded_file = st.file_uploader("Upload DK contest CSV", type=["csv"])
+uploaded_file = st.file_uploader("Step 1 – Upload a DraftKings contest CSV", type=["csv"])
 
 if not uploaded_file:
-    st.info("Upload a DK Contest CSV to get started.")
+    st.info("Upload a DK contest CSV to get started.")
     st.stop()
 
-# Read & transform
+# ----- Build data -----
 df_raw = pd.read_csv(uploaded_file)
 long_df = build_long_df(df_raw)
 long_df = add_field_ownership(long_df)
 lineup_summary = build_lineup_features(long_df)
 
 if lineup_summary.empty:
-    st.error("No lineups parsed. Check that the CSV has a 'Lineup' column in the DK format.")
+    st.error("No lineups parsed. Double-check that the CSV has a DK-style 'Lineup' column.")
     st.stop()
 
-# ---------------- Sidebar controls ----------------
+# ----- Sidebar: simple settings -----
 st.sidebar.header("Settings")
 
 total_entries = lineup_summary.shape[0]
-
 top_pct = st.sidebar.slider(
-    "Top X% considered 'winning lineups'",
+    "What % of lineups should count as 'winners'?",
     min_value=1,
     max_value=20,
     value=5,
-    step=1
+    step=1,
+    help="Example: 5% in a 10,000 entry contest = top 500 lineups."
 )
 
 top_cut_rank = max(1, int(total_entries * (top_pct / 100.0)))
-
 lineup_summary["is_top"] = lineup_summary["rank"] <= top_cut_rank
 
-st.sidebar.write(f"Top cutoff rank: **{top_cut_rank}** out of {total_entries} entries")
-
-# Also flag in long_df
 top_entry_ids = set(lineup_summary[lineup_summary["is_top"]]["entry_id"])
 long_df["is_top"] = long_df["entry_id"].isin(top_entry_ids)
 
-# ---------------- Overall metrics ----------------
+st.sidebar.markdown(f"**Top cutoff rank:** {top_cut_rank} / {total_entries}")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Ownership tiers (fixed):**")
+st.sidebar.markdown(
+    f"""
+- Mega chalk: **≥ {int(MEGA_CHALK_THR*100)}%**  
+- Chalk: **{int(CHALK_THR*100)}–{int(MEGA_CHALK_THR*100)-1}%**  
+- Mid-owned: **{int(PUNT_THR*100)}–{int(CHALK_THR*100)-1}%**  
+- Punt / low-owned: **< {int(PUNT_THR*100)}%**
+"""
+)
+
+# Precompute top vs rest for use in multiple tabs
+top_df = lineup_summary[lineup_summary["is_top"]]
+rest_df = lineup_summary[~lineup_summary["is_top"]]
+
+# ----- Top-level metrics -----
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total entries", total_entries)
-col2.metric("Top group size", lineup_summary["is_top"].sum())
+col2.metric("Winners (top group)", top_df.shape[0])
 col3.metric("Median points (all)", f"{lineup_summary['points'].median():.2f}")
 col4.metric("Median avg ownership (all)", f"{lineup_summary['avg_own'].median():.2%}")
 
-# ---------------- Tabs ----------------
+# ----- Tabs -----
 tab_overview, tab_patterns, tab_players, tab_users, tab_teach = st.tabs(
-    ["Contest Overview", "Winning vs Field Patterns", "Player Ownership", "User Explorer", "Education Summary"]
+    ["1️⃣ Contest Overview", "2️⃣ Winners vs Everyone", "3️⃣ Players", "4️⃣ User Explorer", "5️⃣ Plain-English Summary"]
 )
 
 # -------------------------------------------------
-# TAB 1: Contest Overview
+# TAB 1 – Contest Overview
 # -------------------------------------------------
 with tab_overview:
-    st.subheader("Lineup summary table")
+    st.subheader("Big picture of this contest")
 
-    st.dataframe(
-        lineup_summary[
-            ["rank", "entry_id", "username", "points", "total_salary",
-             "avg_own", "sum_own", "max_own", "n_mega_chalk", "n_chalk", "n_mid", "n_punt", "is_top"]
-        ].reset_index(drop=True)
+    st.markdown(
+        """
+**How to use this:**
+
+- Focus on the left side (rank / points / username).  
+- Look at which lineups count as **winners** (True in the “Winner?” column).  
+- Ignore most of the numbers at first – they’re there if you want to dig deeper.
+"""
     )
 
-    st.subheader("Rank vs Average Ownership")
-    st.caption("Each point is a lineup. You can visually see if winning lineups are more or less owned than the field.")
+    simple_cols = ["rank", "entry_id", "username", "points", "avg_own", "is_top"]
+    renamed = lineup_summary[simple_cols].rename(columns={
+        "rank": "Rank",
+        "entry_id": "Entry ID",
+        "username": "User",
+        "points": "Points",
+        "avg_own": "Avg player ownership",
+        "is_top": f"Winner? (Top {top_pct}%)"
+    })
 
+    # Format avg ownership nicely
+    renamed["Avg player ownership"] = renamed["Avg player ownership"].map(lambda x: f"{x:.1%}")
+
+    st.dataframe(renamed, use_container_width=True)
+
+    with st.expander("Show advanced columns (for nerds)"):
+        st.dataframe(lineup_summary, use_container_width=True)
+
+    st.subheader("Visual: Rank vs Avg Ownership")
+    st.caption("Each dot is a lineup. Left = higher finish. Up/down = more/less chalky on average.")
     st.scatter_chart(
         lineup_summary,
         x="rank",
@@ -310,159 +343,161 @@ with tab_overview:
     )
 
 # -------------------------------------------------
-# TAB 2: Winning vs Field Patterns
+# TAB 2 – Winners vs Everyone
 # -------------------------------------------------
 with tab_patterns:
-    st.subheader("Winning vs Field – Summary stats")
-
-    top_df = lineup_summary[lineup_summary["is_top"]]
-    rest_df = lineup_summary[~lineup_summary["is_top"]]
+    st.subheader("How are winners built differently?")
 
     if top_df.empty or rest_df.empty:
-        st.warning("Top or rest group is empty. Try adjusting the 'Top X%' slider.")
+        st.warning("Top or rest group is empty. Try adjusting the top % slider.")
     else:
-        cols_for_stats = [
-            "points", "avg_own", "sum_own", "max_own",
-            "n_mega_chalk", "n_chalk", "n_mid", "n_punt"
-        ]
-
         def summarize(group, label):
             return pd.DataFrame({
-                "group": label,
-                "mean_points": [group["points"].mean()],
-                "median_points": [group["points"].median()],
-                "mean_avg_own": [group["avg_own"].mean()],
-                "mean_sum_own": [group["sum_own"].mean()],
-                "mean_max_own": [group["max_own"].mean()],
-                "avg_mega_chalk": [group["n_mega_chalk"].mean()],
-                "avg_chalk": [group["n_chalk"].mean()],
-                "avg_mid": [group["n_mid"].mean()],
-                "avg_punt": [group["n_punt"].mean()],
+                "Group": [label],
+                "Mean Points": [group["points"].mean()],
+                "Median Points": [group["points"].median()],
+                "Avg Player Ownership": [group["avg_own"].mean()],
+                "Total Ownership Sum": [group["sum_own"].mean()],
+                "Max Single-Player Ownership": [group["max_own"].mean()],
+                "Mega Chalk (>=40%) per lineup": [group["n_mega_chalk"].mean()],
+                "Chalk (30–39%) per lineup": [group["n_chalk"].mean()],
+                "Mid (10–29%) per lineup": [group["n_mid"].mean()],
+                "Punts (<10%) per lineup": [group["n_punt"].mean()],
             })
 
-        top_stats = summarize(top_df, "Top")
-        rest_stats = summarize(rest_df, "Rest of field")
+        top_stats = summarize(top_df, f"Winners (Top {top_pct}%)")
+        rest_stats = summarize(rest_df, "Everyone else")
         pattern_table = pd.concat([top_stats, rest_stats], ignore_index=True)
 
-        # Format some columns nicely
-        pattern_table["mean_avg_own"] = pattern_table["mean_avg_own"].map(lambda x: f"{x:.2%}")
-        pattern_table["mean_sum_own"] = pattern_table["mean_sum_own"].map(lambda x: f"{x:.2f}")
-        pattern_table["mean_max_own"] = pattern_table["mean_max_own"].map(lambda x: f"{x:.2%}")
-        pattern_table["mean_points"] = pattern_table["mean_points"].map(lambda x: f"{x:.2f}")
-        pattern_table["median_points"] = pattern_table["median_points"].map(lambda x: f"{x:.2f}")
+        # Format percentages nicely
+        pattern_table["Avg Player Ownership"] = pattern_table["Avg Player Ownership"].map(lambda x: f"{x:.1%}")
+        pattern_table["Max Single-Player Ownership"] = pattern_table["Max Single-Player Ownership"].map(lambda x: f"{x:.1%}")
+        pattern_table["Mean Points"] = pattern_table["Mean Points"].map(lambda x: f"{x:.2f}")
+        pattern_table["Median Points"] = pattern_table["Median Points"].map(lambda x: f"{x:.2f}")
+        pattern_table["Total Ownership Sum"] = pattern_table["Total Ownership Sum"].map(lambda x: f"{x:.2f}")
 
-        st.dataframe(pattern_table)
+        st.dataframe(pattern_table, use_container_width=True)
 
         st.markdown(
-            """
-**How to read this:**
+            f"""
+**Read this as:**
 
-- **avg_mega_chalk / avg_chalk / avg_mid / avg_punt** → average number of players of each ownership tier *per lineup*  
-- **mean_avg_own** → how owned the average player is in that lineup  
-- **mean_sum_own** → total ownership sum across the lineup (higher = chalkier overall)
+- First row = **average lineup** from the winners (top {top_pct}%).  
+- Second row = **average lineup** from everyone else.  
+
+Focus on:
+- **Mega Chalk per lineup** → Do winners play more or fewer mega-chalk pieces?  
+- **Punts per lineup** → Do winners use more low-owned darts?
 """
         )
 
 # -------------------------------------------------
-# TAB 3: Player Ownership
+# TAB 3 – Players
 # -------------------------------------------------
 with tab_players:
-    st.subheader("Player ownership – Top vs Field")
+    st.subheader("Which players showed up in winners vs everyone else?")
 
-    # total lineups in each group
-    n_top = top_df["entry_id"].nunique()
-    n_rest = rest_df["entry_id"].nunique()
-
-    # counts for each player in top vs rest
-    g = (
-        long_df
-        .groupby(["player_name", "is_top"])["entry_id"]
-        .nunique()
-        .unstack(fill_value=0)
-        .rename(columns={False: "lineups_rest", True: "lineups_top"})
-        .reset_index()
-    )
-
-    if n_top > 0:
-        g["top_own"] = g["lineups_top"] / n_top
+    if top_df.empty or rest_df.empty:
+        st.warning("Top or rest group is empty. Try adjusting the top % slider.")
     else:
-        g["top_own"] = 0.0
+        n_top = top_df["entry_id"].nunique()
+        n_rest = rest_df["entry_id"].nunique()
 
-    if n_rest > 0:
-        g["rest_own"] = g["lineups_rest"] / n_rest
-    else:
-        g["rest_own"] = 0.0
+        g = (
+            long_df
+            .groupby(["player_name", "is_top"])["entry_id"]
+            .nunique()
+            .unstack(fill_value=0)
+            .rename(columns={False: "lineups_rest", True: "lineups_top"})
+            .reset_index()
+        )
 
-    # overall field ownership (from earlier, same for all)
-    field_own_ref = (
-        long_df.groupby("player_name")["field_own"].first().reset_index()
-    )
+        g["top_own"] = g["lineups_top"] / max(1, n_top)
+        g["rest_own"] = g["lineups_rest"] / max(1, n_rest)
 
-    player_stats = g.merge(field_own_ref, on="player_name", how="left")
+        field_own_ref = (
+            long_df.groupby("player_name")["field_own"].first().reset_index()
+        )
 
-    # Show players sorted by difference in top vs rest ownership
-    player_stats["top_minus_rest"] = player_stats["top_own"] - player_stats["rest_own"]
+        player_stats = g.merge(field_own_ref, on="player_name", how="left")
+        player_stats["top_minus_rest"] = player_stats["top_own"] - player_stats["rest_own"]
 
-    st.markdown("**Players most over-owned in winners vs rest (positive = appeared more in top lineups)**")
-    st.dataframe(
-        player_stats.sort_values("top_minus_rest", ascending=False)[
-            ["player_name", "field_own", "top_own", "rest_own", "top_minus_rest",
-             "lineups_top", "lineups_rest"]
-        ].head(40)
-    )
+        # Format percentages for display
+        display_df = player_stats.copy()
+        for col in ["field_own", "top_own", "rest_own", "top_minus_rest"]:
+            display_df[col] = display_df[col].map(lambda x: f"{x:.1%}")
 
-    st.markdown("All ownership values are fractions (0.25 = 25%).")
+        st.markdown("**Players the winners used more than the rest of the field:**")
+        st.caption("Sorted by how much more they appeared in winning lineups vs everyone else.")
+        st.dataframe(
+            display_df.sort_values("top_minus_rest", ascending=False)[
+                ["player_name", "field_own", "top_own", "rest_own", "top_minus_rest",
+                 "lineups_top", "lineups_rest"]
+            ].head(40),
+            use_container_width=True
+        )
 
 # -------------------------------------------------
-# TAB 4: User Explorer
+# TAB 4 – User Explorer
 # -------------------------------------------------
 with tab_users:
-    st.subheader("Explore specific users and their builds")
+    st.subheader("Spy on how a user built their lineups")
+
+    st.markdown(
+        """
+**How to use this:**
+
+1. Pick a username.  
+2. See all their lineups and how chalky they are.  
+3. Look at the “matrix view” to see what their 150 actually *looks* like.  
+4. Drill into a single lineup to see ownership by player.
+"""
+    )
 
     username_list = sorted(lineup_summary["username"].unique())
-    selected_user = st.selectbox("Select user", username_list)
+    selected_user = st.selectbox("Choose a user", username_list)
 
     user_group = lineup_summary[lineup_summary["username"] == selected_user].copy()
     user_group = user_group.sort_values("rank")
 
+    simple_user = user_group[["rank", "entry_id", "points", "avg_own", "is_top"]].rename(columns={
+        "rank": "Rank",
+        "entry_id": "Entry ID",
+        "points": "Points",
+        "avg_own": "Avg player ownership",
+        "is_top": f"Winner? (Top {top_pct}%)"
+    })
+    simple_user["Avg player ownership"] = simple_user["Avg player ownership"].map(lambda x: f"{x:.1%}")
+
     st.markdown(f"**{selected_user}** – {len(user_group)} lineups")
-    st.dataframe(
-        user_group[
-            ["rank", "entry_id", "points", "total_salary",
-             "avg_own", "sum_own", "max_own",
-             "n_mega_chalk", "n_chalk", "n_mid", "n_punt", "is_top"]
-        ]
-    )
+    st.dataframe(simple_user, use_container_width=True)
 
-    st.subheader("User lineups – players by position (matrix view)")
+    with st.expander("Show full advanced stats for this user"):
+        st.dataframe(user_group, use_container_width=True)
 
+    st.subheader("User lineups – matrix (players in columns)")
     user_matrix = build_user_matrix(long_df, selected_user)
     if not user_matrix.empty:
-        st.dataframe(user_matrix)
+        st.dataframe(user_matrix, use_container_width=True)
     else:
-        st.info("No player matrix available for this user (no parsed lineups).")
+        st.info("No parsed lineups for this user.")
 
     st.subheader("Single lineup detail (ownership by player)")
-
-    selected_entry = st.selectbox("Select Entry ID", user_group["entry_id"])
+    selected_entry = st.selectbox("Pick a lineup (Entry ID)", user_group["entry_id"])
     detail = get_lineup_detail(long_df, selected_entry)
     st.table(detail)
 
 # -------------------------------------------------
-# TAB 5: Education Summary
+# TAB 5 – Plain-English Summary
 # -------------------------------------------------
 with tab_teach:
-    st.subheader("What type of lineups are winning in THIS contest?")
+    st.subheader("What this contest is teaching you")
 
     if top_df.empty or rest_df.empty:
-        st.write("Adjust the top X% slider to create a non-empty top & rest group.")
+        st.write("Adjust the 'top %' slider so there are some winners and some non-winners.")
     else:
-        # Pull a few key numbers for narrative
         top_mean_avg_own = top_df["avg_own"].mean()
         rest_mean_avg_own = rest_df["avg_own"].mean()
-
-        top_mean_sum_own = top_df["sum_own"].mean()
-        rest_mean_sum_own = rest_df["sum_own"].mean()
 
         top_avg_mega = top_df["n_mega_chalk"].mean()
         rest_avg_mega = rest_df["n_mega_chalk"].mean()
@@ -472,61 +507,54 @@ with tab_teach:
 
         st.markdown(
             f"""
-### 1. How chalky are winning lineups?
+### 1. How chalky are winning lineups here?
 
-- Average player ownership in **top {top_pct}%** lineups: **{top_mean_avg_own:.1%}**  
-- Average player ownership in **rest of field**: **{rest_mean_avg_own:.1%}**
+- Average player ownership in **winners** (top {top_pct}%): **{top_mean_avg_own:.1%}**  
+- Average player ownership in **everyone else**: **{rest_mean_avg_own:.1%}**
 
-If top lineups are **lower** here, it means they’re using more sneaky / contrarian pieces.  
-If they’re **higher**, the field may just be bad and the best players simply jammed the right chalk.
+If winners are **less owned** on average → they leaned more into being different.  
+If winners are **more owned** → the slate may have been very chalk-heavy, and you needed the right chalk combo.
 """
         )
 
         st.markdown(
             f"""
-### 2. How many chalk vs punt plays do winners use?
+### 2. How many chalk vs punts do winners use?
 
 Per lineup, on average:
 
-- **Top {top_pct}% lineups**  
-  - Mega-chalk pieces (≥40% owned): **{top_avg_mega:.2f}**  
-  - Low-owned punts (<10% owned): **{top_avg_punt:.2f}**
+**Winners (top {top_pct}%):**
+- Mega chalk pieces (≥40% owned): **{top_avg_mega:.2f}**  
+- Punts (<10% owned): **{top_avg_punt:.2f}**
 
-- **Rest of field**  
-  - Mega-chalk pieces: **{rest_avg_mega:.2f}**  
-  - Low-owned punts: **{rest_avg_punt:.2f}**
+**Everyone else:**
+- Mega chalk pieces: **{rest_avg_mega:.2f}**  
+- Punts: **{rest_avg_punt:.2f}**
 
-If winners play **similar chalk** but **more smart punts**, it suggests:
-> “Eat some chalk, but make sure you have a few low-owned leverage pieces in every lineup.”
+Rough rule of thumb from this contest:
+
+> Play around **{top_avg_mega:.1f} mega-chalk pieces** per lineup  
+> and look to get about **{top_avg_punt:.1f} low-owned punts** that can separate you.
 """
         )
 
         st.markdown(
             """
-### 3. How to use this as a new player
+### 3. How to turn this into a simple blueprint
 
-1. **Scroll the Lineup summary table (Overview tab)**  
-   - Look only at the top 1–5% lineups.  
-   - Notice how many chalk pieces they play vs low-owned guys.
+For future slates in this same contest type:
 
-2. **Check the Player Ownership tab**  
-   - See which players show up **way more** in winning lineups than in the field.  
-   - Those are the types of leverage / core plays that separated winners here.
+1. Use projections or your favorite content to find **the good chalk**.  
+2. Aim for:
+   - A similar number of mega-chalk pieces as winning lineups here.  
+   - A similar number of punts as winning lineups here.  
 
-3. **Use the User Explorer tab**  
-   - Pick a sharp username near the top.  
-   - Look at their **matrix view**:  
-     - Which positions are stable cores?  
-     - Which spots rotate?  
-     - Are they using the same star with different cheap pivots?
+3. Use the **User Explorer** tab to copy the *structure* of sharp players:
+   - How many studs they play  
+   - How much salary they use  
+   - How many spots they rotate vs lock
 
-4. **Build rules for your own 150**  
-   - e.g., “Each lineup should have:  
-     - 1–2 mega-chalk pieces,  
-     - 3–5 mid-owned guys,  
-     - 1–2 low-owned punts.”  
-   - Then enforce that in your optimizer/build process.
+Run this on a few slates and you’ll start to see the same patterns repeat.  
+That’s your personal cheat sheet for how to build lineups that can win in this DraftKings contest.
 """
         )
-
-        st.success("Use this app on multiple slates and see if the same patterns repeat. That’s your personal playbook of what wins in these DraftKings contests.")
