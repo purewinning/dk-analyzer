@@ -5,16 +5,19 @@ from typing import Tuple, List, Optional, Dict
 import pandas as pd
 import pulp
 
-# These should match what you already have in app.py
-MEGA_CHALK_THR = 0.40  # >= 40%
-CHALK_THR      = 0.30  # 30–39
-PUNT_THR       = 0.10  # < 10
+# These should match your thresholds in app.py
+MEGA_CHALK_THR = 0.40  # >= 40% owned
+CHALK_THR      = 0.30  # 30–39%
+PUNT_THR       = 0.10  # < 10%
+
 DEFAULT_SALARY_CAP = 50000
-DEFAULT_ROSTER_SIZE = 8  # DK NBA-style
+DEFAULT_ROSTER_SIZE = 8  # DK NBA-style, change if needed
+
 
 # ---------------- Ownership buckets -----------------
 
 def ownership_bucket(own: float) -> str:
+    """Return ownership bucket name for a given ownership fraction (0-1)."""
     if own >= MEGA_CHALK_THR:
         return "mega"
     elif own >= CHALK_THR:
@@ -46,8 +49,8 @@ class StructureTemplate:
 
         mega_min, mega_max = clip_pair(self.target_mega)
         chalk_min, chalk_max = clip_pair(self.target_chalk)
-        mid_min, mid_max   = clip_pair(self.target_mid)
-        punt_min, punt_max = clip_pair(self.target_punt)
+        mid_min, mid_max     = clip_pair(self.target_mid)
+        punt_min, punt_max   = clip_pair(self.target_punt)
 
         return {
             "mega":  (mega_min, mega_max),
@@ -56,7 +59,8 @@ class StructureTemplate:
             "punt":  (punt_min, punt_max),
         }
 
-# ---------------- Contest profile → template -----------------
+
+# ---------------- Contest params → template -----------------
 
 def build_template_from_params(
     contest_type: str,
@@ -76,7 +80,7 @@ def build_template_from_params(
     large_field = field_size >= 5000
     small_field = field_size <= 1000
 
-    # Defaults – will override below
+    # Default “balanced GPP” starting point
     target_mega = 2.0
     target_chalk = 2.5
     target_mid = 2.5
@@ -84,7 +88,6 @@ def build_template_from_params(
     label = f"{ct}_GENERIC"
 
     if ct == "CASH":
-        # very safe
         label = "CASH"
         target_mega = 3.5
         target_chalk = 3.0
@@ -156,11 +159,13 @@ def build_template_from_params(
         target_punt=target_punt,
     )
 
-# ---------------- Slate loader (if you want standalone) -----------------
+
+# ---------------- Optional: standalone slate loader -----------------
 
 def load_slate_players(path: str) -> pd.DataFrame:
     """
-    Simple loader for slate CSV (if you're not in Streamlit).
+    Standalone loader for slate CSV (if using this module by itself).
+    Same expectations as the app.
     """
     df = pd.read_csv(path)
 
@@ -189,6 +194,7 @@ def load_slate_players(path: str) -> pd.DataFrame:
 
     df["bucket"] = df["own_proj"].apply(ownership_bucket)
     return df
+
 
 # ---------------- Optimizer: build a single lineup -----------------
 
