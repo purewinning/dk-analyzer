@@ -3,8 +3,12 @@ import pandas as pd
 from dataclasses import dataclass
 from typing import Tuple
 
-# Import our structure-based lineup builder (builder.py must exist in the repo)
-from builder import build_template_from_params, build_optimal_lineup
+from builder import (
+    build_template_from_params,
+    build_optimal_lineup,
+    build_optimal_lineup_showdown,
+)
+
 
 # ---------------------------------------------------------
 # CONFIG
