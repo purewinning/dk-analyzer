@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from io import StringIO
 
 st.set_page_config(page_title="DK MME Lineup Analyzer", layout="wide")
 
@@ -20,8 +19,8 @@ def parse_lineup_string(lineup: str):
 
     tokens = str(lineup).split()
     players = []
-
     i = 0
+
     while i < len(tokens):
         tok = tokens[i]
         if tok in POS_SLOTS:
@@ -33,38 +32,32 @@ def parse_lineup_string(lineup: str):
                 i += 1
             player_name = " ".join(name_tokens).strip()
             if player_name:
-                players.append({
-                    "pos_slot": pos,
-                    "player_name": player_name
-                })
+                players.append({"pos_slot": pos, "player_name": player_name})
         else:
             i += 1
+
     return players
 
 def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
 
-    rename_map = {}
-    if "EntryId" in df.columns:
-        rename_map["EntryId"] = "entry_id"
-    if "EntryName" in df.columns:
-        rename_map["EntryName"] = "entry_name"
-    if "Rank" in df.columns:
-        rename_map["Rank"] = "rank"
-    if "Points" in df.columns:
-        rename_map["Points"] = "points"
-    if "Lineup" in df.columns:
-        rename_map["Lineup"] = "lineup"
+    rename_map = {
+        "EntryId": "entry_id",
+        "EntryName": "entry_name",
+        "Rank": "rank",
+        "Points": "points",
+        "Lineup": "lineup"
+    }
 
     df = df.rename(columns=rename_map)
-    df["username"] = df.get("entry_name", "").apply(extract_username)
+    df["username"] = df["entry_name"].apply(extract_username)
 
     records = []
     for _, row in df.iterrows():
         entry_id = row["entry_id"]
-        username = row.get("username", "")
-        rank = row.get("rank", None)
-        points = row.get("points", None)
+        username = row["username"]
+        rank = row["rank"]
+        points = row["points"]
         lineup_str = row["lineup"]
 
         players = parse_lineup_string(lineup_str)
@@ -79,25 +72,21 @@ def build_long_df(df_raw: pd.DataFrame) -> pd.DataFrame:
             })
 
     long_df = pd.DataFrame.from_records(records)
-    long_df = long_df.dropna(subset=["player_name"])
-    return long_df
+    return long_df.dropna(subset=["player_name"])
 
 def add_field_ownership(long_df: pd.DataFrame) -> pd.DataFrame:
     total_entries = long_df["entry_id"].nunique()
-
     own = (
         long_df.groupby("player_name")["entry_id"]
         .nunique()
         .reset_index(name="lineups_with_player")
     )
     own["field_own"] = own["lineups_with_player"] / total_entries
-
     return long_df.merge(own[["player_name", "field_own"]], on="player_name", how="left")
 
 def build_lineup_summary(long_df: pd.DataFrame) -> pd.DataFrame:
     grouped = (
-        long_df
-        .groupby(["entry_id", "username"])
+        long_df.groupby(["entry_id", "username"])
         .agg(
             rank=("rank", "first"),
             points=("points", "first"),
@@ -106,12 +95,12 @@ def build_lineup_summary(long_df: pd.DataFrame) -> pd.DataFrame:
             max_own=("field_own", "max")
         )
         .reset_index()
+        .sort_values("rank")
     )
-    return grouped.sort_values("rank")
+    return grouped
 
-def get_lineup_detail(long_df: pd.DataFrame, entry_id) -> pd.DataFrame:
-    detail = long_df[long_df["entry_id"] == entry_id].copy()
-    detail = detail.sort_values("pos_slot")
+def get_lineup_detail(long_df: pd.DataFrame, entry_id):
+    detail = long_df[long_df["entry_id"] == entry_id].sort_values("pos_slot")
     detail["field_own"] = (detail["field_own"] * 100).map("{:.1f}%".format)
     return detail[["pos_slot", "player_name", "field_own"]]
 
@@ -131,13 +120,15 @@ if uploaded_file:
     username_list = sorted(lineup_summary["username"].unique())
     selected_user = st.selectbox("Select User", username_list)
 
-    user_lineups = lineup_summary[lineup_summary["username"] == selected_user]
-    st.dataframe(user_lineups)
+    user_group = lineup_summary[lineup_summary["username"] == selected_user]
+    st.subheader("User Lineups")
+    st.dataframe(user_group)
 
-    selected_entry = st.selectbox("Select Entry ID", user_lineups["entry_id"])
-    detail_df = get_lineup_detail(long_df, selected_entry)
+    selected_entry = st.selectbox("Select Entry ID", user_group["entry_id"])
+    detail = get_lineup_detail(long_df, selected_entry)
 
     st.subheader("Lineup Detail")
-    st.table(detail_df)
+    st.table(detail)
+
 else:
     st.info("Upload a DK Contest CSV to begin.")
