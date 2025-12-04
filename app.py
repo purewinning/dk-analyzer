@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+from builder import build_template_from_params, build_optimal_lineup
+
 
 # ---------------------------------------------------------
 # CONFIG
