@@ -514,11 +514,12 @@ with tab_overview:
         st.session_state["top_df"] = top_df
         st.session_state["rest_df"] = rest_df
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total entries", total_entries)
-        col2.metric("Winners (top group)", top_df.shape[0])
-        col3.metric("Median points (all)", f"{lineup_summary['points'].median():.2f}")
-        col4.metric("Median avg ownership (all)", f"{lineup_summary['avg_own"].median():.2%}")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total entries", total_entries)
+col2.metric("Winners (top group)", top_df.shape[0])
+col3.metric("Median points (all)", f"{lineup_summary['points'].median():.2f}")
+col4.metric("Median avg ownership (all)", f"{lineup_summary['avg_own'].median():.2%}")
+
 
         simple_cols = ["rank", "entry_id", "username", "points", "avg_own", "is_top"]
         renamed = lineup_summary[simple_cols].rename(columns={
