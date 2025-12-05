@@ -97,28 +97,4 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             'Name': [f'Player {i}' for i in range(1, 15)],
             'positions': ['PG/SG', 'PG', 'SG', 'SF', 'PF/C', 'PF', 'C', 'PG/SF', 'SG/PF', 'C', 'PG', 'SF', 'PF', 'SG'],
             'salary': [6000, 7000, 5000, 8000, 4500, 4000, 9000, 5500, 6500, 4200, 7500, 8500, 4800, 5200],
-            'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.0, 28.0, 31.0],
-            'own_proj': [0.45, 0.35, 0.15, 0.28, 0.05, 0.08, 0.40, 0.12, 0.20, 0.09, 0.33, 0.18, 0.04, 0.16], 
-            'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
-            'Opponent': ['BOS', 'BOS', 'LAL', 'LAL', 'DEN', 'DEN', 'MIL', 'MIL', 'PHX', 'PHX', 'BOS', 'LAL', 'DEN', 'MIL'],
-            'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
-        }
-        df = pd.DataFrame(data)
-        st.warning("⚠️ Using placeholder data. Upload your CSV for real analysis.")
-
-    # Pre-calculate the ownership bucket
-    df['bucket'] = df['own_proj'].apply(ownership_bucket)
-    return df
-
-# --- 2. TAB FUNCTIONS ---
-
-def tab_lineup_builder(slate_df, template):
-    """Function to render the Lineup Builder tab."""
-    st.header("Optimal Lineup Generation")
-    
-    st.info(f"🎯 Template: **{template.contest_label}** | Target Ownership Breakdown: {template.bucket_ranges(slack=1)}")
-    
-    if st.button("Generate Optimal Lineup"):
-        
-        with st.spinner(f'Calculating {template.contest_label} optimal lineup...'):
-            optimal_lineup_df =
+            'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.
