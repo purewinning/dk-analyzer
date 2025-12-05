@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List
+# Import everything from builder to ensure access to constants
 from builder import (
     build_template_from_params, 
     build_optimal_lineup, 
@@ -16,76 +17,17 @@ SALARY_CAP = 50000
 TOTAL_PLAYERS = 8
 MIN_GAMES_REQUIRED = 2
 
-# --- NEW: HEADER MAPPING (Only map Player for display and internal player_id) ---
-# We are aligning internal names, so we only need to map 'Player' to 'Name'
-HEADER_MAP = {
-    'Player': 'Name',             
-}
+# --- HEADER MAPPING (Not used for placeholder, but kept for context) ---
+HEADER_MAP = {'Player': 'Name'} 
 
-# --- 1. DATA PREPARATION ---
+# --- 1. DATA PREPARATION (Simplified to ONLY use safe placeholder data) ---
 
 def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
-    """Loads uploaded CSV, renames 'Player' to 'Name', and processes data."""
+    """Uses only safe, hardcoded placeholder data to guarantee a working DataFrame."""
     
-    df = pd.DataFrame()
+    st.info("ℹ️ Running DIAGNOSTIC MODE: Using only internal placeholder data.")
     
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.success("✅ Data loaded successfully from file.")
-
-            # --- STEP 1: RENAME 'Player' to 'Name' for consistency ---
-            if 'Player' in df.columns:
-                df.rename(columns={'Player': 'Name'}, inplace=True)
-            
-            # --- STEP 2: VALIDATE REQUIRED COLUMNS (Using your CSV names) ---
-            # NOTE: The *internal* builder code still expects 'salary', 'proj', and 'own_proj' 
-            # We must map your CSV names to these internal names.
-            
-            REQUIRED_CSV_TO_INTERNAL_MAP = {
-                'Salary': 'salary',
-                'Position': 'positions',
-                'Projection': 'proj',
-                'Ownership %': 'own_proj',
-            }
-            
-            # Check for missing columns
-            missing_csv_cols = [col for col in REQUIRED_CSV_TO_INTERNAL_MAP.keys() if col not in df.columns]
-            if missing_csv_cols:
-                st.error(f"Missing one or more required columns. Need: {list(REQUIRED_CSV_TO_INTERNAL_MAP.keys())}. Missing: {missing_csv_cols}")
-                return pd.DataFrame()
-
-            # Perform the internal renaming for the optimizer logic
-            df.rename(columns=REQUIRED_CSV_TO_INTERNAL_MAP, inplace=True)
-            
-            # --- STEP 3: CREATE GAMEID (CRITICAL FIX) ---
-            required_game_cols = ['Team', 'Opponent']
-            if 'GameID' not in df.columns:
-                if all(col in df.columns for col in required_game_cols):
-                    df['GameID'] = df.apply(
-                        lambda row: '@'.join(sorted([str(row['Team']), str(row['Opponent'])])), axis=1
-                    )
-                    st.info("ℹ️ Created **GameID** using Team and Opponent columns.")
-                else:
-                    st.error("Missing required column **GameID**. Cannot create game diversity constraint.")
-                    return pd.DataFrame()
-            
-            # --- STEP 4: CLEANUP DATA TYPES ---
-            df['player_id'] = df['Name'] # Use Name as the internal player_id
-            
-            # Ensure ownership is between 0 and 1
-            if df['own_proj'].max() > 10: 
-                 df['own_proj'] = df['own_proj'] / 100
-                 st.info("ℹ️ Divided 'own_proj' by 100 (assuming % format).")
-
-            df['salary'] = df['salary'].astype(int)
-            df['proj'] = df['proj'].astype(float)
-            
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
-            return pd.DataFrame()
-    else:
-        # --- Placeholder Data Setup (Only used if no file is uploaded) ---
+    try:
         data = {
             'player_id': [f'P{i}' for i in range(1, 15)],
             'Name': [f'Player {i}' for i in range(1, 15)],
@@ -98,10 +40,119 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
         }
         df = pd.DataFrame(data)
-        st.info("ℹ️ Using placeholder data. Upload your CSV to analyze a real slate.")
+        
+        # Pre-calculate the ownership bucket
+        df['bucket'] = df['own_proj'].apply(ownership_bucket)
+        
+        st.success("✅ Placeholder data loaded and pre-processed successfully.")
+        return df
+        
+    except Exception as e:
+        st.error(f"CRITICAL FAILURE: Placeholder data crashed the app. Error: {e}")
+        return pd.DataFrame()
 
-    # Pre-calculate the ownership bucket for the leverage constraint
-    df['bucket'] = df['own_proj'].apply(ownership_bucket)
-    return df
 
-# --- (The rest of app.py remains the same: tab functions, main execution) ---
+# --- 2. TAB FUNCTIONS (REMAIN UNCHANGED) ---
+
+# ... (Include your tab_lineup_builder function here) ...
+def tab_lineup_builder(slate_df, template):
+    st.header("Optimal Lineup Generation")
+    # ... (rest of the function logic) ...
+    st.info(f"🎯 Using Template: **{template.contest_label}** | Target Ownership Breakdown: {template.bucket_ranges(slack=1)}")
+    if st.button("Generate Optimal Lineup"):
+        # ... (optimization logic) ...
+        with st.spinner('Calculating optimal lineup...'):
+            optimal_lineup_df = build_optimal_lineup(
+                slate_df=slate_df,
+                template=template,
+                bucket_slack=1,
+            )
+        # ... (display results logic) ...
+        if optimal_lineup_df is not None:
+             # Calculate summary metrics
+            total_salary = optimal_lineup_df['salary'].sum()
+            total_points = optimal_lineup_df['proj'].sum()
+            games_used = optimal_lineup_df['GameID'].nunique()
+            st.subheader("🏆 Optimal Lineup Found")
+            # Display the Lineup
+            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+            st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
+            st.markdown("---")
+            st.subheader("Summary")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Projection", f"{total_points:.2f} Pts")
+            col2.metric("Salary Used", f"${total_salary:,}")
+            col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
+        else:
+            st.error("❌ Could not find an optimal solution. Check constraints and player pool.")
+
+# ... (Include your tab_contest_analyzer function here) ...
+def tab_contest_analyzer(slate_df, template):
+    st.header("Contest and Ownership Analysis")
+    # ... (rest of the function logic) ...
+    st.subheader("Template Settings")
+    st.json({
+        "Contest Type": template.contest_label,
+        "Roster Size": template.roster_size,
+        "Salary Cap": f"${template.salary_cap:,}",
+        "Min Games Required": template.min_games
+    })
+    st.subheader("Ownership Ranges (Leverage Constraint)")
+    ranges = template.bucket_ranges(slack=1) 
+    range_data = {
+        "Bucket": list(ranges.keys()),
+        "Ownership Threshold": [
+            f"< {PUNT_THR*100:.0f}%", 
+            f"{PUNT_THR*100:.0f}% - {CHALK_THR*100:.0f}%", 
+            f"{CHALK_THR*100:.0f}% - {MEGA_CHALK_THR*100:.0f}%", 
+            f"> {MEGA_CHALK_THR*100:.0f}%"
+        ],
+        "Target Count (Min-Max)": [f"{v[0]} - {v[1]}" for v in ranges.values()]
+    }
+    st.dataframe(pd.DataFrame(range_data), hide_index=True)
+    st.subheader("Current Player Pool Ownership Distribution")
+    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
+    st.dataframe(pool_counts.rename("Player Count in Pool"), use_container_width=True)
+
+
+# --- 3. MAIN APPLICATION ENTRY POINT ---
+
+if __name__ == '__main__':
+    
+    st.set_page_config(layout="wide")
+    st.title("DraftKings NBA Optimizer & Analyzer 📊")
+    st.markdown("---")
+    
+    # File uploader is hidden during this diagnostic test
+    with st.sidebar:
+        st.header("📥 Player Data")
+        st.write("File upload is DISABLED for diagnostic test.")
+        uploaded_file = None # Force no file to be loaded
+        
+    # 1. Load Data
+    # This call must succeed if the app is working.
+    slate_df = load_and_preprocess_data(uploaded_file)
+    
+    if slate_df.empty:
+        st.error("Application is halted due to placeholder data failure.")
+        st.stop()
+    
+    # 2. Define the Target Contest Structure 
+    template = build_template_from_params(
+        contest_type="SE", 
+        field_size=10000, 
+        pct_to_first=30.0,
+        roster_size=TOTAL_PLAYERS,
+        salary_cap=SALARY_CAP,
+        min_games=MIN_GAMES_REQUIRED
+    )
+
+    # 3. Create the Tabs
+    tab1, tab2 = st.tabs(["🚀 Lineup Builder", "🔍 Contest Analyzer"])
+
+    with tab1:
+        tab_lineup_builder(slate_df, template)
+
+    with tab2:
+        tab_contest_analyzer(slate_df, template)
