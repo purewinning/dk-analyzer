@@ -87,6 +87,24 @@ if __name__ == '__main__':
     # 4. Process and Display Results
     if optimal_lineup_df is not None:
         
-        # Calculate summary metrics
+        # Calculate summary metrics - Lines 91-93 are critical here
         total_salary = optimal_lineup_df['salary'].sum()
-        total_points = optimal_lineup_df['
+        total_points = optimal_lineup_df['proj'].sum()  # <--- THIS IS THE CORRECTED LINE
+        games_used = optimal_lineup_df['GameID'].nunique()
+        
+        print("### 🏆 Optimal DraftKings NBA Lineup Found ###")
+        
+        # Display the Lineup in a clean DataFrame format
+        display_cols = ['player_id', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+        lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+        
+        print(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
+        
+        print("\n--- Lineup Summary ---")
+        print(f"Total Projected Points: **{total_points:.2f}**")
+        print(f"Total Salary Used: **${total_salary:,}**")
+        print(f"Games Represented: **{games_used}** (Required: {MIN_GAMES_REQUIRED})")
+        print(f"Lineup Structure: \n{lineup_df_display['bucket'].value_counts().to_string()}")
+
+    else:
+        print("❌ Could not find an optimal solution. Check constraints and player pool.")
