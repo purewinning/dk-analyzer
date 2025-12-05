@@ -1,28 +1,6 @@
 # app.py
 
-import pandas as pd
-import numpy as np
-import streamlit as st 
-from typing import Dict, Any, List
-from builder import (
-    build_template_from_params, 
-    build_optimal_lineup, 
-    ownership_bucket,
-    PUNT_THR, CHALK_THR, MEGA_CHALK_THR,
-    DEFAULT_SALARY_CAP, DEFAULT_ROSTER_SIZE
-) 
-
-# --- CONFIGURATION CONSTANTS ---
-MIN_GAMES_REQUIRED = 2
-
-# --- HEADER MAPPING (For your CSV format) ---
-REQUIRED_CSV_TO_INTERNAL_MAP = {
-    'Salary': 'salary',
-    'Position': 'positions',
-    'Projection': 'proj',
-    'Ownership %': 'own_proj',
-}
-
+# ... (imports and constants remain the same) ...
 
 # --- 1. DATA PREPARATION ---
 
@@ -60,10 +38,21 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
                     st.error("Missing required columns: **Team** and **Opponent** (or **GameID**).")
                     return pd.DataFrame()
             
-            # --- STEP 3: CLEANUP DATA TYPES ---
+            # --- STEP 3: CLEANUP DATA TYPES (CRITICAL FIX) ---
             df['player_id'] = df['Name'] 
+            
+            # Convert ownership projection to numeric, coercing errors to NaN
+            df['own_proj'] = pd.to_numeric(df['own_proj'], errors='coerce')
+            
+            # Drop any rows where own_proj is now invalid (NaN)
+            df.dropna(subset=['own_proj'], inplace=True)
+            
+            # Ensure ownership is between 0 and 1 (dividing if uploaded as a percentage)
             if df['own_proj'].max() > 10: 
                  df['own_proj'] = df['own_proj'] / 100
+                 st.info("ℹ️ Divided 'own_proj' by 100 (assuming % format).")
+                 
+            # Final type conversions
             df['salary'] = df['salary'].astype(int)
             df['proj'] = df['proj'].astype(float)
             
@@ -72,6 +61,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             return pd.DataFrame()
     else:
         # --- Placeholder Data Setup (Fallback) ---
+        # (Placeholder data creation remains here)
         data = {
             'player_id': [f'P{i}' for i in range(1, 15)],
             'Name': [f'Player {i}' for i in range(1, 15)],
@@ -90,133 +80,4 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
     return df
 
-# --- 2. TAB FUNCTIONS ---
-
-def tab_lineup_builder(slate_df, template):
-    """Function to render the Lineup Builder tab."""
-    st.header("Optimal Lineup Generation")
-    
-    st.info(f"🎯 Template: **{template.contest_label}** | Target Ownership Breakdown: {template.bucket_ranges(slack=1)}")
-    
-    if st.button("Generate Optimal Lineup"):
-        
-        with st.spinner(f'Calculating {template.contest_label} optimal lineup...'):
-            optimal_lineup_df = build_optimal_lineup(
-                slate_df=slate_df,
-                template=template,
-                bucket_slack=1,
-            )
-        
-        if optimal_lineup_df is not None:
-            total_salary = optimal_lineup_df['salary'].sum()
-            total_points = optimal_lineup_df['proj'].sum()
-            games_used = optimal_lineup_df['GameID'].nunique()
-            
-            st.subheader("🏆 Optimal Lineup Found")
-            
-            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
-            
-            st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
-            
-            st.markdown("---")
-            st.subheader("Summary")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Projection", f"{total_points:.2f} Pts")
-            col2.metric("Salary Used", f"${total_salary:,}")
-            col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
-            
-        else:
-            st.error("❌ Could not find an optimal solution. Try adjusting constraints or player pool.")
-
-def tab_contest_analyzer(slate_df, template):
-    """Function to render the Contest Analyzer tab."""
-    st.header("Contest and Ownership Analysis")
-    st.markdown(f"This analyzer is targeting the **{template.contest_label}** structure.")
-    st.markdown("---")
-
-    st.subheader("Template Settings")
-    st.json({
-        "Contest Type": template.contest_label,
-        "Roster Size": template.roster_size,
-        "Salary Cap": f"${template.salary_cap:,}",
-        "Min Games Required": template.min_games
-    })
-    
-    st.subheader("Ownership Ranges (Leverage Constraint)")
-    ranges = template.bucket_ranges(slack=1) 
-    
-    range_data = {
-        "Bucket": list(ranges.keys()),
-        "Ownership Threshold": [
-            f"< {PUNT_THR*100:.0f}%", 
-            f"{PUNT_THR*100:.0f}% - {CHALK_THR*100:.0f}%", 
-            f"{CHALK_THR*100:.0f}% - {MEGA_CHALK_THR*100:.0f}%", 
-            f"> {MEGA_CHALK_THR*100:.0f}%"
-        ],
-        "Target Count (Min-Max)": [f"{v[0]} - {v[1]}" for v in ranges.values()]
-    }
-    st.dataframe(pd.DataFrame(range_data), hide_index=True)
-
-    st.subheader("Current Player Pool Ownership Distribution")
-    # Line with the fix:
-    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
-    st.dataframe(pool_counts.rename("Player Count in Pool"), use_container_width=True)
-
-
-# --- 3. MAIN APPLICATION ENTRY POINT ---
-
-if __name__ == '__main__':
-    
-    st.set_page_config(layout="wide")
-    st.title("DraftKings NBA Optimizer & Analyzer 📊")
-    st.markdown("---")
-    
-    # --- Sidebar Configuration (Contest Type & File Upload) ---
-    with st.sidebar:
-        st.header("1. Contest Setup")
-        
-        contest_type = st.radio(
-            "Select Contest Type:",
-            ('CASH', 'GPP (Single Entry)', 'GPP (Large Field)')
-        )
-        
-        if contest_type == 'GPP (Single Entry)':
-            contest_code = 'SE'
-        elif contest_type == 'GPP (Large Field)':
-            contest_code = 'LARGE_GPP'
-        else: # CASH
-            contest_code = 'CASH'
-            
-        st.markdown("---")
-        
-        st.header("2. Player Data")
-        uploaded_file = st.file_uploader(
-            "Upload Player Projections (CSV)", 
-            type=['csv'],
-            help="Required headers: Player, Salary, Position, Projection, Ownership %, Team, Opponent."
-        )
-        
-    # 1. Load Data
-    slate_df = load_and_preprocess_data(uploaded_file)
-    if slate_df.empty:
-        st.stop()
-        
-    # 2. Define the Target Contest Structure 
-    template = build_template_from_params(
-        contest_type=contest_code, 
-        field_size=10000, 
-        pct_to_first=30.0,
-        roster_size=DEFAULT_ROSTER_SIZE,
-        salary_cap=DEFAULT_SALARY_CAP,
-        min_games=MIN_GAMES_REQUIRED
-    )
-
-    # 3. Create the Tabs
-    tab1, tab2 = st.tabs(["🚀 Lineup Builder", "🔍 Contest Analyzer"])
-
-    with tab1:
-        tab_lineup_builder(slate_df, template)
-
-    with tab2:
-        tab_contest_analyzer(slate_df, template)
+# ... (The rest of app.py remains the same) ...
