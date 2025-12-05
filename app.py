@@ -9,11 +9,10 @@ from builder import (
     build_optimal_lineup, 
     ownership_bucket,
     PUNT_THR, CHALK_THR, MEGA_CHALK_THR,
-    DEFAULT_SALARY_CAP, DEFAULT_ROSTER_SIZE # Import default values for consistency
+    DEFAULT_SALARY_CAP, DEFAULT_ROSTER_SIZE
 ) 
 
 # --- CONFIGURATION CONSTANTS ---
-# Use imported defaults, but define min games
 MIN_GAMES_REQUIRED = 2
 
 # --- HEADER MAPPING (For your CSV format) ---
@@ -38,7 +37,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             st.success("✅ Data loaded successfully from uploaded file.")
 
             # --- STEP 1: RENAME COLUMNS ---
-            # Rename 'Player' to 'Name'
             if 'Player' in df.columns:
                 df.rename(columns={'Player': 'Name'}, inplace=True)
             
@@ -92,7 +90,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
     return df
 
-# --- 2. TAB FUNCTIONS (Kept clean) ---
+# --- 2. TAB FUNCTIONS ---
 
 def tab_lineup_builder(slate_df, template):
     """Function to render the Lineup Builder tab."""
@@ -106,60 +104,4 @@ def tab_lineup_builder(slate_df, template):
             optimal_lineup_df = build_optimal_lineup(
                 slate_df=slate_df,
                 template=template,
-                bucket_slack=1,
-            )
-        
-        if optimal_lineup_df is not None:
-            total_salary = optimal_lineup_df['salary'].sum()
-            total_points = optimal_lineup_df['proj'].sum()
-            games_used = optimal_lineup_df['GameID'].nunique()
-            
-            st.subheader("🏆 Optimal Lineup Found")
-            
-            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
-            
-            st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
-            
-            st.markdown("---")
-            st.subheader("Summary")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Projection", f"{total_points:.2f} Pts")
-            col2.metric("Salary Used", f"${total_salary:,}")
-            col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
-            
-        else:
-            st.error("❌ Could not find an optimal solution. Try adjusting constraints or player pool.")
-
-def tab_contest_analyzer(slate_df, template):
-    """Function to render the Contest Analyzer tab."""
-    st.header("Contest and Ownership Analysis")
-    st.markdown(f"This analyzer is targeting the **{template.contest_label}** structure.")
-    st.markdown("---")
-
-    st.subheader("Template Settings")
-    st.json({
-        "Contest Type": template.contest_label,
-        "Roster Size": template.roster_size,
-        "Salary Cap": f"${template.salary_cap:,}",
-        "Min Games Required": template.min_games
-    })
-    
-    st.subheader("Ownership Ranges (Leverage Constraint)")
-    ranges = template.bucket_ranges(slack=1) 
-    
-    range_data = {
-        "Bucket": list(ranges.keys()),
-        "Ownership Threshold": [
-            f"< {PUNT_THR*100:.0f}%", 
-            f"{PUNT_THR*100:.0f}% - {CHALK_THR*100:.0f}%", 
-            f"{CHALK_THR*100:.0f}% - {MEGA_CHALK_THR*100:.0f}%", 
-            f"> {MEGA_CHALK_THR*100:.0f}%"
-        ],
-        "Target Count (Min-Max)": [f"{v[0]} - {v[1]}" for v in ranges.values()]
-    }
-    st.dataframe(pd.DataFrame(range_data), hide_index=True)
-
-    st.subheader("Current Player Pool Ownership Distribution")
-    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
-    st.dataframe(pool_counts.rename("Player Count in Pool
+                bucket_slack=1
