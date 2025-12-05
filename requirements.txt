@@ -1,4 +1,2 @@
-/app.py
-/builder.py
-/requirements.txt
-README.md
+streamlit
+pandas
