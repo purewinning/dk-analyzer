@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List
+# Import the core logic functions and classes, including the ownership thresholds
 from builder import (
     build_template_from_params, 
     build_optimal_lineup, 
@@ -16,15 +17,15 @@ SALARY_CAP = 50000
 TOTAL_PLAYERS = 8
 MIN_GAMES_REQUIRED = 2
 
-# --- NEW: HEADER MAPPING ---
-# Maps the column names from your uploaded file (KEY) to the internal names (VALUE)
+# --- HEADER MAPPING (Translates external CSV headers to internal headers) ---
 HEADER_MAP = {
-    'Player': 'Name',             # Used for display
-    'Salary': 'salary',           # Used for salary constraint
-    'Position': 'positions',      # Used for positional constraints
-    'Projection': 'proj',         # Used for objective function (points)
-    'Ownership %': 'own_proj',    # Used for ownership/leverage constraints
-    # 'Team' and 'Opponent' will be used to create 'GameID'
+    'Player': 'Name',             
+    'Salary': 'salary',           
+    'Position': 'positions',      
+    'Projection': 'proj',         
+    'Ownership %': 'own_proj',    
+    'Team': 'Team',               # Keep 'Team' for GameID creation
+    'Opponent': 'Opponent'        # Keep 'Opponent' for GameID creation
 }
 
 # --- 1. DATA PREPARATION ---
@@ -40,7 +41,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             st.success("✅ Data loaded successfully from file.")
 
             # --- STEP 1: RENAME COLUMNS ---
-            # Create a dictionary of present columns that need renaming
             rename_map = {
                 old_name: new_name 
                 for old_name, new_name in HEADER_MAP.items() 
@@ -48,33 +48,35 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             }
             df.rename(columns=rename_map, inplace=True)
             
-            # --- STEP 2: VALIDATE REQUIRED COLUMNS ---
+            # --- STEP 2: VALIDATE REQUIRED COLUMNS (After Renaming) ---
             required_internal_cols = ['Name', 'salary', 'positions', 'proj', 'own_proj']
+            required_game_cols = ['Team', 'Opponent']
+            
             if not all(col in df.columns for col in required_internal_cols):
                 missing = [col for col in required_internal_cols if col not in df.columns]
                 st.error(f"Missing one or more required columns after renaming. Missing: {missing}")
                 return pd.DataFrame()
 
             # --- STEP 3: CREATE GAMEID (CRITICAL FIX) ---
-            # If GameID is missing, use Team and Opponent to create a unique GameID string.
             if 'GameID' not in df.columns:
-                if 'Team' in df.columns and 'Opponent' in df.columns:
-                    # Create a consistent game identifier (e.g., 'LAL@BOS')
+                if all(col in df.columns for col in required_game_cols):
+                    # Create a consistent game identifier (e.g., 'BOS@LAL')
                     df['GameID'] = df.apply(
-                        lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1
+                        lambda row: '@'.join(sorted([str(row['Team']), str(row['Opponent'])])), axis=1
                     )
                     st.info("ℹ️ Created **GameID** using Team and Opponent columns.")
                 else:
                     st.error("Missing required column **GameID**. Cannot create game diversity constraint.")
                     return pd.DataFrame()
             
-            # --- STEP 4: CLEANUP OWNERSHIP AND SALARY ---
-            # Ensure ownership is between 0 and 1 (if uploaded as percent, divide by 100)
+            # --- STEP 4: CLEANUP DATA TYPES ---
+            df['player_id'] = df['Name'] 
+            
+            # Ensure ownership is between 0 and 1
             if df['own_proj'].max() > 10: 
                  df['own_proj'] = df['own_proj'] / 100
                  st.info("ℹ️ Divided 'own_proj' by 100 (assuming % format).")
 
-            df['player_id'] = df['Name'] # Use Name as the internal player_id for the optimizer
             df['salary'] = df['salary'].astype(int)
             df['proj'] = df['proj'].astype(float)
             
@@ -83,7 +85,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             return pd.DataFrame()
     else:
         # --- Placeholder Data Setup (Only used if no file is uploaded) ---
-        # (Placeholder data creation remains as before for safety)
         data = {
             'player_id': [f'P{i}' for i in range(1, 15)],
             'Name': [f'Player {i}' for i in range(1, 15)],
@@ -92,6 +93,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.0, 28.0, 31.0],
             'own_proj': [0.45, 0.35, 0.15, 0.28, 0.05, 0.08, 0.40, 0.12, 0.20, 0.09, 0.33, 0.18, 0.04, 0.16], 
             'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
+            'Opponent': ['BOS', 'BOS', 'LAL', 'LAL', 'DEN', 'DEN', 'MIL', 'MIL', 'PHX', 'PHX', 'BOS', 'LAL', 'DEN', 'MIL'],
             'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
         }
         df = pd.DataFrame(data)
@@ -101,5 +103,65 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
     return df
 
-# --- (The rest of app.py remains the same, including tab functions) ---
-# ... (tab_lineup_builder, tab_contest_analyzer, and if __name__ == '__main__': block) ...
+# --- 2. TAB FUNCTIONS ---
+
+def tab_lineup_builder(slate_df, template):
+    """Function to render the Lineup Builder tab."""
+    st.header("Optimal Lineup Generation")
+    
+    st.info(f"🎯 Using Template: **{template.contest_label}** | Target Ownership Breakdown: {template.bucket_ranges(slack=1)}")
+    
+    if st.button("Generate Optimal Lineup"):
+        
+        # 3. Run Optimization (Classic NBA)
+        with st.spinner('Calculating optimal lineup...'):
+            optimal_lineup_df = build_optimal_lineup(
+                slate_df=slate_df,
+                template=template,
+                bucket_slack=1,
+            )
+        
+        # 4. Process and Display Results
+        if optimal_lineup_df is not None:
+            
+            # Calculate summary metrics
+            total_salary = optimal_lineup_df['salary'].sum()
+            total_points = optimal_lineup_df['proj'].sum()
+            games_used = optimal_lineup_df['GameID'].nunique()
+            
+            st.subheader("🏆 Optimal Lineup Found")
+            
+            # Display the Lineup
+            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+            
+            st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
+            
+            st.markdown("---")
+            st.subheader("Summary")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Projection", f"{total_points:.2f} Pts")
+            col2.metric("Salary Used", f"${total_salary:,}")
+            col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
+            
+        else:
+            st.error("❌ Could not find an optimal solution. Check constraints and player pool.")
+
+def tab_contest_analyzer(slate_df, template):
+    """Function to render the Contest Analyzer tab."""
+    st.header("Contest and Ownership Analysis")
+    st.markdown(f"This analyzer is targeting the **{template.contest_label}** structure.")
+    st.markdown("---")
+
+    st.subheader("Template Settings")
+    
+    # Display the Template parameters
+    st.json({
+        "Contest Type": template.contest_label,
+        "Roster Size": template.roster_size,
+        "Salary Cap": f"${template.salary_cap:,}",
+        "Min Games Required": template.min_games
+    })
+    
+    st.subheader("Ownership Ranges (Leverage Constraint)")
+    ranges = template.bucket_ranges(slack=
