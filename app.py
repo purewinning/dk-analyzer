@@ -2,65 +2,124 @@
 
 import pandas as pd
 import numpy as np
-import streamlit as st # Crucial for Streamlit apps
+import streamlit as st 
 from typing import Dict, Any, List
 # Import the core logic functions and classes from builder.py
 from builder import build_template_from_params, build_optimal_lineup, ownership_bucket 
 
-# --- CONFIGURATION CONSTANTS (Keep these consistent with builder.py if changed) ---
+# --- CONFIGURATION CONSTANTS ---
 SALARY_CAP = 50000
 TOTAL_PLAYERS = 8
 MIN_GAMES_REQUIRED = 2
 
 # --- 1. DATA PREPARATION ---
 
-def load_and_preprocess_data(file_path: str = 'draftkings_projections.csv') -> pd.DataFrame:
-    """
-    Loads raw player data and processes it for the optimizer.
-    
-    A crucial step is ensuring 'player_id', 'positions', 'salary', 'proj', 
-    'own_proj', and 'GameID' columns exist and are correctly typed.
-    """
-    try:
-        # --- Placeholder Data Setup for demonstration purposes ---
-        # Data must have columns matching those used in builder.py
-        data = {
-            'player_id': [f'P{i}' for i in range(1, 15)],
-            'positions': ['PG/SG', 'PG', 'SG', 'SF', 'PF/C', 'PF', 'C', 'PG/SF', 'SG/PF', 'C', 'PG', 'SF', 'PF', 'SG'],
-            'salary': [6000, 7000, 5000, 8000, 4500, 4000, 9000, 5500, 6500, 4200, 7500, 8500, 4800, 5200],
-            'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.0, 28.0, 31.0],
-            'own_proj': [0.45, 0.35, 0.15, 0.28, 0.05, 0.08, 0.40, 0.12, 0.20, 0.09, 0.33, 0.18, 0.04, 0.16], 
-            'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
-            'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
-        }
-        df = pd.DataFrame(data)
-        st.write("✅ Using placeholder data. Remember to load your CSV.")
-        # --- End Placeholder Setup ---
-
-    except Exception as e:
-        st.error(f"Error loading data: {e}. Cannot proceed.")
-        return pd.DataFrame()
-
-    # Pre-calculate the ownership bucket for the leverage constraint
+def load_and_preprocess_data() -> pd.DataFrame:
+    """Loads placeholder data for demonstration."""
+    # --- Placeholder Data Setup ---
+    data = {
+        'player_id': [f'P{i}' for i in range(1, 15)],
+        'positions': ['PG/SG', 'PG', 'SG', 'SF', 'PF/C', 'PF', 'C', 'PG/SF', 'SG/PF', 'C', 'PG', 'SF', 'PF', 'SG'],
+        'salary': [6000, 7000, 5000, 8000, 4500, 4000, 9000, 5500, 6500, 4200, 7500, 8500, 4800, 5200],
+        'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.0, 28.0, 31.0],
+        'own_proj': [0.45, 0.35, 0.15, 0.28, 0.05, 0.08, 0.40, 0.12, 0.20, 0.09, 0.33, 0.18, 0.04, 0.16], 
+        'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
+        'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
+    }
+    df = pd.DataFrame(data)
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
-    
     return df
 
-# --- 2. EXECUTION AND DISPLAY ---
+# --- 2. TAB FUNCTIONS ---
 
-def run_app():
-    # 0. Initialize Streamlit UI
-    st.title("DraftKings NBA Lineup Optimizer 🏀")
+def tab_lineup_builder(slate_df, template):
+    """Function to render the Lineup Builder tab."""
+    st.header("Optimal Lineup Generation")
+    
+    st.info(f"🎯 Using Template: **{template.contest_label}** | Target Ownership Breakdown: {template.bucket_ranges(slack=1)}")
+    
+    if st.button("Generate Optimal Lineup"):
+        
+        # 3. Run Optimization (Classic NBA)
+        optimal_lineup_df = build_optimal_lineup(
+            slate_df=slate_df,
+            template=template,
+            bucket_slack=1,
+        )
+        
+        # 4. Process and Display Results
+        if optimal_lineup_df is not None:
+            
+            # Calculate summary metrics
+            total_salary = optimal_lineup_df['salary'].sum()
+            total_points = optimal_lineup_df['proj'].sum()
+            games_used = optimal_lineup_df['GameID'].nunique()
+            
+            st.subheader("🏆 Optimal Lineup Found")
+            
+            # Display the Lineup
+            display_cols = ['player_id', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+            
+            st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
+            
+            st.markdown("---")
+            st.subheader("Summary")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Projection", f"{total_points:.2f} Pts")
+            col2.metric("Salary Used", f"${total_salary:,}")
+            col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
+            
+        else:
+            st.error("❌ Could not find an optimal solution. Check constraints and player pool.")
+
+def tab_contest_analyzer(slate_df, template):
+    """Function to render the Contest Analyzer tab."""
+    st.header("Contest and Ownership Analysis")
+    st.markdown(f"This analyzer is targeting the **{template.contest_label}** structure.")
+    st.markdown("---")
+
+    st.subheader("Template Settings")
+    
+    # Display the Template parameters
+    st.json({
+        "Contest Type": template.contest_label,
+        "Roster Size": template.roster_size,
+        "Salary Cap": f"${template.salary_cap:,}",
+        "Min Games Required": template.min_games
+    })
+    
+    st.subheader("Ownership Ranges (Leverage Constraint)")
+    ranges = template.bucket_ranges(slack=1)
+    
+    range_data = {
+        "Bucket": list(ranges.keys()),
+        "Ownership Threshold": [f"< {PUNT_THR*100}%", f"{PUNT_THR*100}% - {CHALK_THR*100}%", f"{CHALK_THR*100}% - {MEGA_CHALK_THR*100}%", f"> {MEGA_CHALK_THR*100}%"],
+        "Target Count (Min-Max)": [f"{v[0]} - {v[1]}" for v in ranges.values()]
+    }
+    st.dataframe(pd.DataFrame(range_data), hide_index=True)
+
+    st.subheader("Current Player Pool Ownership Distribution")
+    
+    # Display the actual distribution of players in the pool
+    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
+    st.dataframe(pool_counts.rename("Player Count in Pool"), use_container_width=True)
+
+
+# --- 3. MAIN APPLICATION ENTRY POINT ---
+
+if __name__ == '__main__':
+    st.set_page_config(layout="wide")
+    st.title("DraftKings NBA Optimizer & Analyzer 📊")
     st.markdown("---")
 
     # 1. Load Data
     slate_df = load_and_preprocess_data()
     if slate_df.empty:
-        return # Stop execution if data failed to load
+        st.error("Application stopped due to data loading failure.")
+        st.stop()
         
-    st.header("1. Contest Setup")
-
-    # 2. Define the Target Contest Structure (Example: Single Entry, Top Heavy GPP)
+    # 2. Define the Target Contest Structure (Using hardcoded example for now)
     template = build_template_from_params(
         contest_type="SE", 
         field_size=10000, 
@@ -69,50 +128,12 @@ def run_app():
         salary_cap=SALARY_CAP,
         min_games=MIN_GAMES_REQUIRED
     )
-    
-    st.info(f"🎯 Using Template: **{template.contest_label}** | Target Ownership Breakdown: {template.bucket_ranges(slack=1)}")
-    
-    st.header("2. Optimization Results")
 
-    # 3. Run Optimization (Classic NBA)
-    optimal_lineup_df = build_optimal_lineup(
-        slate_df=slate_df,
-        template=template,
-        bucket_slack=1,
-    )
-    
-    # 4. Process and Display Results
-    if optimal_lineup_df is not None:
-        
-        # Calculate summary metrics
-        total_salary = optimal_lineup_df['salary'].sum()
-        total_points = optimal_lineup_df['proj'].sum()
-        games_used = optimal_lineup_df['GameID'].nunique()
-        
-        st.subheader("🏆 Optimal Lineup Found")
-        
-        # Define columns and display the Lineup in a clean DataFrame format
-        display_cols = ['player_id', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-        
-        # Line 96, corrected:
-        lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
-        
-        # Use st.markdown with to_markdown() for display
-        st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
-        
-        st.markdown("---")
-        st.subheader("Summary")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Projection", f"{total_points:.2f} Pts")
-        col2.metric("Salary Used", f"${total_salary:,}")
-        col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
-        
-        st.markdown("---")
-        st.subheader("Ownership Structure")
-        st.write(lineup_df_display['bucket'].value_counts())
+    # 3. Create the Tabs
+    tab1, tab2 = st.tabs(["🚀 Lineup Builder", "🔍 Contest Analyzer"])
 
-    else:
-        st.error("❌ Could not find an optimal solution. Check constraints and player pool.")
+    with tab1:
+        tab_lineup_builder(slate_df, template)
 
-if __name__ == '__main__':
-    run_app()
+    with tab2:
+        tab_contest_analyzer(slate_df, template)
