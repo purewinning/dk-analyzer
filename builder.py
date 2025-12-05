@@ -83,7 +83,7 @@ def build_template_from_params(
     ct = contest_type.upper()
     top_heavy = pct_to_first >= 20
     large_field = field_size >= 5000
-    small_field = field_size <= 1000
+    # small_field = field_size <= 1000 # Unused variable, kept for context
 
     target_mega = 2.0
     target_chalk = 2.5
