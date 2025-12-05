@@ -121,42 +121,4 @@ def tab_lineup_builder(slate_df, template):
     if st.button("Generate Optimal Lineup"):
         
         with st.spinner(f'Calculating {template.contest_label} optimal lineup...'):
-            optimal_lineup_df = build_optimal_lineup(
-                slate_df=slate_df,
-                template=template,
-                bucket_slack=1,
-            )
-        
-        if optimal_lineup_df is not None:
-            total_salary = optimal_lineup_df['salary'].sum()
-            total_points = optimal_lineup_df['proj'].sum()
-            games_used = optimal_lineup_df['GameID'].nunique()
-            
-            st.subheader("🏆 Optimal Lineup Found")
-            
-            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
-            
-            st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
-            
-            st.markdown("---")
-            st.subheader("Summary")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Projection", f"{total_points:.2f} Pts")
-            col2.metric("Salary Used", f"${total_salary:,}")
-            col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
-            
-        else:
-            st.error("❌ Could not find an optimal solution. Try adjusting constraints or player pool.")
-
-def tab_contest_analyzer(slate_df, template):
-    """Function to render the Contest Analyzer tab."""
-    st.header("Contest and Ownership Analysis")
-    st.markdown(f"This analyzer is targeting the **{template.contest_label}** structure.")
-    st.markdown("---")
-
-    st.subheader("Template Settings")
-    st.json({
-        "Contest Type": template.contest_label,
-        "Roster Size": template.roster_size,
-        "Salary Cap": f
+            optimal_lineup_df =
