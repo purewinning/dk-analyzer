@@ -1,14 +1,28 @@
 import streamlit as st
 import pandas as pd
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
-# Import from builder.py (must exist in the same repo)
-from builder import (
-    build_template_from_params,
-    build_optimal_lineup,
-    build_optimal_lineup_showdown,
-)
+# ---------------------------------------------------------
+# Import from builder.py (with safe fallback for showdown)
+# ---------------------------------------------------------
+try:
+    from builder import (
+        build_template_from_params,
+        build_optimal_lineup,
+        build_optimal_lineup_showdown,
+    )
+    HAS_SHOWDOWN = True
+except ImportError:
+    # builder.py doesn't have showdown yet – that's ok, app will still run
+    from builder import (
+        build_template_from_params,
+        build_optimal_lineup,
+    )
+
+    build_optimal_lineup_showdown = None
+    HAS_SHOWDOWN = False
+
 
 # ---------------------------------------------------------
 # CONFIG
@@ -37,7 +51,11 @@ class StructureRule:
     punt_range: Tuple[int, int]
 
 
-def get_structure_rule(contest_type: str, roster_size: int = 8, field_size: int = None) -> StructureRule:
+def get_structure_rule(
+    contest_type: str,
+    roster_size: int = 8,
+    field_size: Optional[int] = None,
+) -> StructureRule:
     """
     Simple presets describing typical bucket patterns for different contest types.
     Used only for the "User Explorer" tab summary.
@@ -418,7 +436,7 @@ Upload:
 
 Supports:
 - **Classic**: 8-player DK lineups  
-- **Showdown**: 1 Captain (1.5× points/salary) + 5 FLEX under $50k
+- **Showdown**: 1 CPT + 5 FLEX (enabled only if your `builder.py` has it)
 """
 )
 
@@ -545,11 +563,11 @@ Expected columns (names can vary, we normalize):
 - `Salary` or `salary`
 - `Projection` / `Proj` / `proj`
 - `Own` or `own_proj` (fraction: 0.25 = 25%)
-
-For **showdown**, just upload one row per player (base version).  
-The app will create CPT (1.5× salary/points) and FLEX versions internally.
 """
     )
+
+    if not HAS_SHOWDOWN:
+        st.info("Showdown building is disabled because `builder.py` doesn't expose `build_optimal_lineup_showdown`. Classic still works fine.")
 
     slate_file = st.file_uploader(
         "Upload slate + projections CSV (player pool)",
@@ -562,11 +580,14 @@ The app will create CPT (1.5× salary/points) and FLEX versions internally.
     else:
         slate_df = load_slate_players_from_upload(slate_file)
 
-        slate_mode = st.radio(
-            "Slate format",
-            ["Classic (8-player DK)", "Showdown (1 CPT + 5 FLEX)"],
-            index=0,
-        )
+        if HAS_SHOWDOWN:
+            slate_mode = st.radio(
+                "Slate format",
+                ["Classic (8-player DK)", "Showdown (1 CPT + 5 FLEX)"],
+                index=0,
+            )
+        else:
+            slate_mode = "Classic (8-player DK)"
 
         st.markdown("### Player pool (base data)")
         player_view = slate_df.copy()
@@ -618,19 +639,23 @@ The app will create CPT (1.5× salary/points) and FLEX versions internally.
 
         if st.button("Build sample lineup"):
             if "Showdown" in slate_mode:
-                template = build_template_from_params(
-                    contest_type=contest_type,
-                    field_size=field_size,
-                    pct_to_first=pct_to_first,
-                    roster_size=6,      # 1 CPT + 5 FLEX
-                    salary_cap=50000,
-                )
-                lineup = build_optimal_lineup_showdown(
-                    slate_df,
-                    template=template,
-                    bucket_slack=bucket_slack,
-                )
-                st.write("Using structure profile: **{}** (Showdown, 6 players)".format(template.contest_label))
+                if not HAS_SHOWDOWN or build_optimal_lineup_showdown is None:
+                    st.error("Showdown builder not available. Update builder.py to add `build_optimal_lineup_showdown`.")
+                    lineup = None
+                else:
+                    template = build_template_from_params(
+                        contest_type=contest_type,
+                        field_size=field_size,
+                        pct_to_first=pct_to_first,
+                        roster_size=6,      # 1 CPT + 5 FLEX
+                        salary_cap=50000,
+                    )
+                    lineup = build_optimal_lineup_showdown(
+                        slate_df,
+                        template=template,
+                        bucket_slack=bucket_slack,
+                    )
+                    st.write("Using structure profile: **{}** (Showdown, 6 players)".format(template.contest_label))
             else:
                 template = build_template_from_params(
                     contest_type=contest_type,
@@ -960,7 +985,7 @@ For a similar contest:
 2. Decide how many low-owned punts you're comfortable with.
 3. Use the **Slate & Builder** tab:
    - Pick contest type (CASH / SE / 3MAX / MME),
-   - Pick Classic or Showdown,
+   - Pick Classic (and Showdown once it's wired up),
    - Build a sample lineup that matches that ownership structure.
 """
         )
