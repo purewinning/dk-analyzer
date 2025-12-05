@@ -64,19 +64,28 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             df['player_id'] = df['Name'] 
             
             # CRITICAL FIX: Convert ownership projection to numeric, handling errors
+            initial_len = len(df)
             df['own_proj'] = pd.to_numeric(df['own_proj'], errors='coerce')
             
             # Drop any rows where own_proj is now invalid (NaN)
             df.dropna(subset=['own_proj'], inplace=True)
+            dropped_len = initial_len - len(df)
             
+            if dropped_len > 0:
+                 st.warning(f"⚠️ Dropped {dropped_len} player(s) due to invalid 'Ownership %' data.")
+
             # Ensure ownership is between 0 and 1
-            if df['own_proj'].max() > 10: 
+            if len(df) > 0 and df['own_proj'].max() > 10: 
                  df['own_proj'] = df['own_proj'] / 100
                  st.info("ℹ️ Divided 'own_proj' by 100 (assuming % format).")
                  
             # Final type conversions
             df['salary'] = df['salary'].astype(int)
             df['proj'] = df['proj'].astype(float)
+
+            if len(df) == 0:
+                 st.error("❌ Final player pool is empty after cleaning.")
+                 return pd.DataFrame()
             
         except Exception as e:
             st.error(f"Error processing file: {e}")
@@ -150,83 +159,4 @@ def tab_contest_analyzer(slate_df, template):
     st.json({
         "Contest Type": template.contest_label,
         "Roster Size": template.roster_size,
-        "Salary Cap": f"${template.salary_cap:,}",
-        "Min Games Required": template.min_games
-    })
-    
-    st.subheader("Ownership Ranges (Leverage Constraint)")
-    ranges = template.bucket_ranges(slack=1) 
-    
-    range_data = {
-        "Bucket": list(ranges.keys()),
-        "Ownership Threshold": [
-            f"< {PUNT_THR*100:.0f}%", 
-            f"{PUNT_THR*100:.0f}% - {CHALK_THR*100:.0f}%", 
-            f"{CHALK_THR*100:.0f}% - {MEGA_CHALK_THR*100:.0f}%", 
-            f"> {MEGA_CHALK_THR*100:.0f}%"
-        ],
-        "Target Count (Min-Max)": [f"{v[0]} - {v[1]}" for v in ranges.values()]
-    }
-    st.dataframe(pd.DataFrame(range_data), hide_index=True)
-
-    st.subheader("Current Player Pool Ownership Distribution")
-    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
-    st.dataframe(pool_counts.rename("Player Count in Pool"), use_container_width=True)
-
-
-# --- 3. MAIN APPLICATION ENTRY POINT ---
-
-if __name__ == '__main__':
-    
-    st.set_page_config(layout="wide")
-    st.title("DraftKings NBA Optimizer & Analyzer 📊")
-    st.markdown("---")
-    
-    # --- Sidebar Configuration (Contest Type & File Upload) ---
-    with st.sidebar:
-        st.header("1. Contest Setup")
-        
-        contest_type = st.radio(
-            "Select Contest Type:",
-            ('CASH', 'GPP (Single Entry)', 'GPP (Large Field)')
-        )
-        
-        if contest_type == 'GPP (Single Entry)':
-            contest_code = 'SE'
-        elif contest_type == 'GPP (Large Field)':
-            contest_code = 'LARGE_GPP'
-        else: # CASH
-            contest_code = 'CASH'
-            
-        st.markdown("---")
-        
-        st.header("2. Player Data")
-        uploaded_file = st.file_uploader(
-            "Upload Player Projections (CSV)", 
-            type=['csv'],
-            help="Required headers: Player, Salary, Position, Projection, Ownership %, Team, Opponent."
-        )
-        
-    # 1. Load Data
-    slate_df = load_and_preprocess_data(uploaded_file)
-    if slate_df.empty:
-        st.stop()
-        
-    # 2. Define the Target Contest Structure 
-    template = build_template_from_params(
-        contest_type=contest_code, 
-        field_size=10000, 
-        pct_to_first=30.0,
-        roster_size=DEFAULT_ROSTER_SIZE,
-        salary_cap=DEFAULT_SALARY_CAP,
-        min_games=MIN_GAMES_REQUIRED
-    )
-
-    # 3. Create the Tabs
-    tab1, tab2 = st.tabs(["🚀 Lineup Builder", "🔍 Contest Analyzer"])
-
-    with tab1:
-        tab_lineup_builder(slate_df, template)
-
-    with tab2:
-        tab_contest_analyzer(slate_df, template)
+        "Salary Cap": f
