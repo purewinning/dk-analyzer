@@ -91,28 +91,32 @@ def build_template_from_params(
     target_punt = 1.0
     label = f"{ct}_GENERIC"
     
-    # ... (Heuristic logic remains here) ...
-
+    # Heuristic logic for template selection
     if ct == "CASH":
         label = "CASH"
         target_mega = 3.5
         target_chalk = 3.0
         target_mid = 1.0
         target_punt = 0.5
-    elif ct == "SE":
+    elif ct == "SE": # Single Entry
         if large_field and top_heavy:
             label = "SE_BIG_TOPHEAVY"
             target_mega = 1.5
             target_chalk = 2.0
             target_mid = 2.0
             target_punt = 2.5
-        # ... (other SE logic here) ...
         else:
             label = "SE_BALANCED"
             target_mega = 2.0
             target_chalk = 2.5
             target_mid = 2.0
             target_punt = 1.5
+    elif ct == "LARGE_GPP":
+        label = "GPP_LARGE_FIELD"
+        target_mega = 1.0
+        target_chalk = 1.5
+        target_mid = 2.0
+        target_punt = 3.5
 
     return StructureTemplate(
         contest_label=label,
