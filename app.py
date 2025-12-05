@@ -24,8 +24,8 @@ HEADER_MAP = {
     'Position': 'positions',      
     'Projection': 'proj',         
     'Ownership %': 'own_proj',    
-    'Team': 'Team',               # Keep 'Team' for GameID creation
-    'Opponent': 'Opponent'        # Keep 'Opponent' for GameID creation
+    'Team': 'Team',               
+    'Opponent': 'Opponent'        
 }
 
 # --- 1. DATA PREPARATION ---
@@ -164,4 +164,36 @@ def tab_contest_analyzer(slate_df, template):
     })
     
     st.subheader("Ownership Ranges (Leverage Constraint)")
-    ranges = template.bucket_ranges(slack=
+    # This line (line 167 in your context) is now correctly closed:
+    ranges = template.bucket_ranges(slack=1) 
+    
+    range_data = {
+        "Bucket": list(ranges.keys()),
+        "Ownership Threshold": [
+            f"< {PUNT_THR*100:.0f}%", 
+            f"{PUNT_THR*100:.0f}% - {CHALK_THR*100:.0f}%", 
+            f"{CHALK_THR*100:.0f}% - {MEGA_CHALK_THR*100:.0f}%", 
+            f"> {MEGA_CHALK_THR*100:.0f}%"
+        ],
+        "Target Count (Min-Max)": [f"{v[0]} - {v[1]}" for v in ranges.values()]
+    }
+    st.dataframe(pd.DataFrame(range_data), hide_index=True)
+
+    st.subheader("Current Player Pool Ownership Distribution")
+    
+    # Display the actual distribution of players in the pool
+    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
+    st.dataframe(pool_counts.rename("Player Count in Pool"), use_container_width=True)
+
+
+# --- 3. MAIN APPLICATION ENTRY POINT ---
+
+if __name__ == '__main__':
+    st.set_page_config(layout="wide")
+    st.title("DraftKings NBA Optimizer & Analyzer 📊")
+    st.markdown("---")
+    
+    # File uploader in the sidebar
+    with st.sidebar:
+        st.header("📥 Player Data")
+        uploaded_file = st
