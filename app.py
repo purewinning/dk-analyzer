@@ -91,6 +91,28 @@ def run_app():
         
         st.subheader("🏆 Optimal Lineup Found")
         
-        # Display the Lineup in a clean DataFrame format
+        # Define columns and display the Lineup in a clean DataFrame format
         display_cols = ['player_id', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-        lineup_df_display = optimal_lineup_df[display_cols
+        
+        # Line 96, corrected:
+        lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+        
+        # Use st.markdown with to_markdown() for display
+        st.markdown(lineup_df_display.to_markdown(index=False, floatfmt=".2f"))
+        
+        st.markdown("---")
+        st.subheader("Summary")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Projection", f"{total_points:.2f} Pts")
+        col2.metric("Salary Used", f"${total_salary:,}")
+        col3.metric("Games Represented", f"{games_used} / {MIN_GAMES_REQUIRED} Min")
+        
+        st.markdown("---")
+        st.subheader("Ownership Structure")
+        st.write(lineup_df_display['bucket'].value_counts())
+
+    else:
+        st.error("❌ Could not find an optimal solution. Check constraints and player pool.")
+
+if __name__ == '__main__':
+    run_app()
