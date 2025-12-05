@@ -20,7 +20,7 @@ REQUIRED_CSV_TO_INTERNAL_MAP = {
     'Salary': 'salary',
     'Position': 'positions',
     'Projection': 'proj',
-    'Ownership %': 'own_proj',
+    'Ownership': 'own_proj', # <-- CHANGED from 'Ownership %' to 'Ownership'
 }
 
 
@@ -65,14 +65,19 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             
             # CRITICAL FIX: Convert ownership projection to numeric, handling errors
             initial_len = len(df)
-            df['own_proj'] = pd.to_numeric(df['own_proj'], errors='coerce')
+            # This handles cases where the user's data might use commas as decimals instead of periods,
+            # or if the data is already a float/int but stored as an object type in the DataFrame.
+            df['own_proj'] = pd.to_numeric(
+                df['own_proj'].astype(str).str.replace(',', '.'), # Safely replace commas with periods
+                errors='coerce' 
+            )
             
             # Drop any rows where own_proj is now invalid (NaN)
             df.dropna(subset=['own_proj'], inplace=True)
             dropped_len = initial_len - len(df)
             
             if dropped_len > 0:
-                 st.warning(f"⚠️ Dropped {dropped_len} player(s) due to invalid 'Ownership %' data.")
+                 st.warning(f"⚠️ Dropped {dropped_len} player(s) due to invalid 'Ownership' data.")
 
             # Ensure ownership is between 0 and 1
             if len(df) > 0 and df['own_proj'].max() > 10: 
@@ -213,7 +218,7 @@ if __name__ == '__main__':
         uploaded_file = st.file_uploader(
             "Upload Player Projections (CSV)", 
             type=['csv'],
-            help="Required headers: Player, Salary, Position, Projection, Ownership %, Team, Opponent."
+            help="Required headers: Player, Salary, Position, Projection, Ownership, Team, Opponent." # <-- Updated help text
         )
         
     # 1. Load Data
