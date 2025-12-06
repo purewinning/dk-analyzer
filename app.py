@@ -20,68 +20,85 @@ st.set_page_config(layout="wide", page_title="🏀 DK Lineup Optimizer")
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
 
-# --- TOURNAMENT TEMPLATES ---
+# --- TOURNAMENT TEMPLATES (RESEARCH-BACKED) ---
 TOURNAMENT_OWNERSHIP_TEMPLATES = {
+    "CASH": {
+        "name": "Cash Game (50/50, Double-Up)",
+        "description": "High floor, consistency over ceiling",
+        "ownership_targets": {
+            "punt": (0, 2),      # Minimize risk
+            "mid": (3, 5),       # Safe, solid plays
+            "chalk": (3, 5),     # Popular = good for cash
+            "mega": (0, 2)       # Stars are fine if projected well
+        },
+        "strategy_notes": "Play chalk. High ownership is GOOD in cash games. Need 50th percentile score."
+    },
     "SE": {
         "name": "Single Entry GPP",
-        "description": "High leverage, differentiated builds",
+        "description": "Balanced with 1-2 contrarian pivots",
         "ownership_targets": {
-            "punt": (1, 4),
-            "mid": (2, 5),
-            "chalk": (1, 4),
-            "mega": (0, 2)
-        }
+            "punt": (2, 4),      # Some leverage
+            "mid": (2, 4),       # Balanced
+            "chalk": (1, 3),     # 1-2 chalk plays max
+            "mega": (0, 1)       # At most 1 mega chalk
+        },
+        "strategy_notes": "Ownership more condensed. Pivot off 1-2 chalk plays. Need top 10-15%."
     },
     "3MAX": {
         "name": "3-Max GPP",
-        "description": "Balanced with variety across 3 entries",
+        "description": "Core + variety across 3 entries",
         "ownership_targets": {
-            "punt": (1, 4),
-            "mid": (2, 5),
-            "chalk": (2, 5),
-            "mega": (0, 2)
-        }
+            "punt": (1, 4),      # Mix of leverage
+            "mid": (2, 5),       # Flexibility
+            "chalk": (1, 4),     # Some chalk OK
+            "mega": (0, 2)       # Diversify mega exposure
+        },
+        "strategy_notes": "Build around 2-3 core players. Vary punt/chalk combos across entries."
     },
     "20MAX": {
         "name": "20-Max GPP",
-        "description": "Diverse builds with exposure control",
+        "description": "High exposure management, diverse builds",
         "ownership_targets": {
-            "punt": (0, 5),
-            "mid": (1, 6),
-            "chalk": (1, 5),
-            "mega": (0, 3)
-        }
+            "punt": (1, 5),      # Wide range for diversity
+            "mid": (1, 5),       # Flexible
+            "chalk": (0, 4),     # Sometimes fade all chalk
+            "mega": (0, 2)       # Limit mega exposure
+        },
+        "strategy_notes": "Max 50% exposure per player. Need 3-4 distinct build types."
     },
     "LARGE_GPP": {
-        "name": "Large Field GPP (150-Max)",
-        "description": "Maximum leverage, contrarian heavy",
+        "name": "Large Field GPP (150-Max, Milly Maker)",
+        "description": "Maximum leverage, must be different",
         "ownership_targets": {
-            "punt": (2, 5),
-            "mid": (1, 4),
-            "chalk": (0, 3),
-            "mega": (0, 1)
-        }
-    },
-    "CASH": {
-        "name": "Cash Game",
-        "description": "Safe, high floor, chalk plays",
-        "ownership_targets": {
-            "punt": (0, 3),
-            "mid": (2, 6),
-            "chalk": (2, 6),
-            "mega": (0, 2)
-        }
+            "punt": (3, 6),      # Heavy leverage required
+            "mid": (1, 3),       # Some solid plays
+            "chalk": (0, 2),     # Fade most chalk
+            "mega": (0, 1)       # At most 1, often 0
+        },
+        "strategy_notes": "Need <5% owned player. Top 0.1% to win. Be VERY different."
     },
     "SHOWDOWN": {
         "name": "Showdown Captain Mode",
-        "description": "Single game, correlation focused",
+        "description": "Single game, correlation key",
         "ownership_targets": {
             "punt": (1, 3),
             "mid": (2, 4),
             "chalk": (1, 3),
             "mega": (0, 2)
-        }
+        },
+        "strategy_notes": "Game stacking and correlation trump ownership."
     }
+}
+
+# Entry fee tiers and their typical field sizes
+ENTRY_FEE_TIERS = {
+    "$0.25": {"min_field": 100, "max_field": 10000, "skill_level": "Beginner"},
+    "$1": {"min_field": 500, "max_field": 50000, "skill_level": "Recreational"},
+    "$3": {"min_field": 1000, "max_field": 100000, "skill_level": "Intermediate"},
+    "$5": {"min_field": 2000, "max_field": 150000, "skill_level": "Intermediate"},
+    "$10": {"min_field": 3000, "max_field": 200000, "skill_level": "Advanced"},
+    "$20": {"min_field": 5000, "max_field": 300000, "skill_level": "Advanced"},
+    "$50+": {"min_field": 10000, "max_field": 500000, "skill_level": "Expert/Shark"}
 }
 
 # --- HEADER MAPPING ---
@@ -513,8 +530,9 @@ def tab_lineup_builder(slate_df, template):
         template_info = TOURNAMENT_OWNERSHIP_TEMPLATES[contest_code]
         targets = template_info['ownership_targets']
         
-        with st.expander("📋 Recommended Ownership Construction"):
-            st.markdown(f"**{template_info['name']}** - {template_info['description']}")
+        with st.expander("📋 Research-Backed Optimal Construction", expanded=True):
+            st.markdown(f"**{template_info['name']}**")
+            st.info(f"💡 **{template_info['strategy_notes']}**")
             
             construction_df = pd.DataFrame({
                 'Bucket': ['Punt (<10%)', 'Mid (10-30%)', 'Chalk (30-40%)', 'Mega (>40%)'],
@@ -524,15 +542,54 @@ def tab_lineup_builder(slate_df, template):
                     f"{targets['chalk'][0]}-{targets['chalk'][1]}",
                     f"{targets['mega'][0]}-{targets['mega'][1]}"
                 ],
-                'Strategy': [
-                    '🔵 Low owned leverage plays',
-                    '🟢 Solid mid-tier value',
-                    '🟡 Popular but good plays',
-                    '🔴 Ultra-chalk stars'
+                'Why This Works': [
+                    '🔵 Low owned players = high leverage if they hit',
+                    '🟢 Safe plays with upside. Balanced risk/reward',
+                    '🟡 Popular for a reason, but limits differentiation',
+                    '🔴 Everyone plays them. Only good if must-play'
                 ]
             })
             
             st.table(construction_df)
+            
+            # Add field-size specific advice
+            field_size = tournament_config.get('field_size', 10000)
+            entry_fee = tournament_config.get('entry_fee', '$3')
+            
+            if contest_code == 'LARGE_GPP':
+                st.warning(f"""
+**Large Field Strategy ({field_size:,} entries):**
+- Need top 0.1-1% to win big money
+- MUST have at least 1 player <5% owned
+- Fade 2-3 of the most popular plays
+- High risk/high reward mentality
+                """)
+            elif contest_code in ['SE', '3MAX']:
+                st.info(f"""
+**Single/Limited Entry Strategy ({field_size:,} entries):**
+- People play safer in single-entry
+- Pivot off 1-2 chalk plays for differentiation
+- Need top 10-20% to profit
+- Can't "make up for it" with more entries
+                """)
+            elif contest_code == 'CASH':
+                st.success(f"""
+**Cash Game Strategy ({field_size:,} entries):**
+- TOP 45-50% WINS. Play it safe!
+- High ownership is GOOD here
+- Prioritize high floor over ceiling
+- Avoid boom-or-bust plays
+                """)
+            
+            # Entry fee based adjustments
+            if entry_fee in ["$20", "$50+"]:
+                st.error(f"""
+**⚠️ HIGH STAKES ({entry_fee} entry):**
+- Much tougher competition (sharks/pros)
+- Need deeper edge than public
+- Public projections won't cut it
+- Consider game theory heavily
+                """)
     
     st.markdown("---")
     
@@ -671,65 +728,128 @@ if __name__ == '__main__':
     # Sidebar
     with st.sidebar:
         st.title("🏀 DK Lineup Optimizer")
-        st.caption("Maximize Projection based on Template")
+        st.caption("Research-Backed Tournament Strategy")
         
-        st.subheader("🎯 Tournament Selection")
+        st.subheader("🎯 Contest Details")
         
+        # Tournament type selection
         tournament_type = st.selectbox(
-            "Select Tournament Type",
+            "Tournament Type",
             options=[
+                "Cash Game (50/50, Double-Up)",
                 "Single Entry GPP",
                 "3-Max GPP", 
                 "20-Max GPP",
-                "150-Max GPP (Large Field)",
-                "Cash Game (50/50, Double Up)",
-                "Showdown Captain Mode",
-                "Custom"
+                "Large Field GPP (Milly Maker)",
+                "Showdown Captain Mode"
             ],
-            help="Different tournaments require different strategies"
+            help="Each type requires a different optimal strategy"
         )
         
+        # Entry fee selection
+        entry_fee = st.selectbox(
+            "Entry Fee",
+            options=["$0.25", "$1", "$3", "$5", "$10", "$20", "$50+"],
+            index=2,  # Default to $3
+            help="Higher entry fees = tougher competition"
+        )
+        
+        fee_info = ENTRY_FEE_TIERS[entry_fee]
+        
+        # Field size selection
+        field_size = st.slider(
+            "Expected Field Size",
+            min_value=fee_info["min_field"],
+            max_value=fee_info["max_field"],
+            value=min(10000, fee_info["max_field"]),
+            step=100 if fee_info["max_field"] < 10000 else 1000,
+            help="Larger fields = need more leverage"
+        )
+        
+        # Show competition level
+        st.caption(f"💪 Competition Level: **{fee_info['skill_level']}**")
+        
+        # Map tournament types to strategy codes
         tournament_map = {
-            "Single Entry GPP": {"code": "SE", "description": "High leverage, unique builds. Go contrarian to win big.", "field_size": 10000, "top_payout_pct": 0.001, "recommended_lineups": 1},
-            "3-Max GPP": {"code": "3MAX", "description": "Balanced variety. Mix chalk with contrarian.", "field_size": 15000, "top_payout_pct": 0.001, "recommended_lineups": 3},
-            "20-Max GPP": {"code": "20MAX", "description": "High diversity required. Multiple construction styles.", "field_size": 50000, "top_payout_pct": 0.0005, "recommended_lineups": 20},
-            "150-Max GPP (Large Field)": {"code": "LARGE_GPP", "description": "Maximum leverage and diversity needed.", "field_size": 150000, "top_payout_pct": 0.0001, "recommended_lineups": 150},
-            "Cash Game (50/50, Double Up)": {"code": "CASH", "description": "Safety first. High floor, chalk plays, consistency.", "field_size": 1000, "top_payout_pct": 0.50, "recommended_lineups": 1},
-            "Showdown Captain Mode": {"code": "SHOWDOWN", "description": "Single game. Correlations matter most.", "field_size": 5000, "top_payout_pct": 0.001, "recommended_lineups": 20},
-            "Custom": {"code": "SE", "description": "Custom settings", "field_size": 10000, "top_payout_pct": 0.01, "recommended_lineups": 10}
+            "Cash Game (50/50, Double-Up)": {
+                "code": "CASH",
+                "top_payout_pct": 0.45,  # Top 45% cash
+                "recommended_lineups": 1
+            },
+            "Single Entry GPP": {
+                "code": "SE",
+                "top_payout_pct": 0.20,  # Top 20% cash, but need top 10-15% to profit
+                "recommended_lineups": 1
+            },
+            "3-Max GPP": {
+                "code": "3MAX",
+                "top_payout_pct": 0.20,
+                "recommended_lineups": 3
+            },
+            "20-Max GPP": {
+                "code": "20MAX",
+                "top_payout_pct": 0.15,
+                "recommended_lineups": 20
+            },
+            "Large Field GPP (Milly Maker)": {
+                "code": "LARGE_GPP",
+                "top_payout_pct": 0.20,  # ~20% cash but need top 1% to win big
+                "recommended_lineups": 150
+            },
+            "Showdown Captain Mode": {
+                "code": "SHOWDOWN",
+                "top_payout_pct": 0.20,
+                "recommended_lineups": 20
+            }
         }
         
         tournament_config = tournament_map[tournament_type]
+        tournament_config['field_size'] = field_size
+        tournament_config['entry_fee'] = entry_fee
+        tournament_config['description'] = TOURNAMENT_OWNERSHIP_TEMPLATES[tournament_config['code']]['description']
         
-        st.info(f"**Strategy:** {tournament_config['description']}")
-        st.caption(f"Avg Field Size: ~{tournament_config['field_size']:,}")
-        st.caption(f"Top {tournament_config['top_payout_pct']*100}% pays out")
+        # Show tournament info
+        st.info(f"""
+**Strategy:** {tournament_config['description']}
+
+**Field:** {field_size:,} entries at {entry_fee}
         
-        with st.expander("⚙️ Advanced Tournament Settings"):
+**Top {tournament_config['top_payout_pct']*100:.0f}%** of field cashes
+        """)
+        
+        # Adjust strategy based on field size and entry fee
+        if tournament_config['code'] in ['SE', '3MAX', '20MAX', 'LARGE_GPP']:
+            # GPP specific adjustments
+            if field_size > 50000:
+                st.warning("⚠️ **Large Field**: Need maximum leverage. Fade chalk heavily.")
+            elif entry_fee in ["$20", "$50+"]:
+                st.warning("⚠️ **High Stakes**: Tougher competition. Avoid obvious plays.")
+        
+        with st.expander("⚙️ Advanced Settings"):
             ownership_strategy = "Balanced"
             
-            if tournament_type == "Custom":
-                custom_field_size = st.number_input("Field Size", min_value=100, max_value=500000, value=10000, step=1000)
-                tournament_config['field_size'] = custom_field_size
-                
-                custom_payout_pct = st.slider("Top % That Pays", min_value=0.01, max_value=50.0, value=1.0, step=0.01, format="%.2f%%") / 100
-                tournament_config['top_payout_pct'] = custom_payout_pct
+            # Ownership strategy override
+            ownership_strategy = st.select_slider(
+                "Override Ownership Strategy",
+                options=["Full Chalk", "Balanced", "Contrarian", "Max Leverage"],
+                value="Balanced",
+                help="Override the recommended strategy"
+            )
             
-            ownership_strategy = st.select_slider("Ownership Strategy", options=["Full Chalk", "Balanced", "Contrarian", "Max Leverage"], value="Balanced", help="Override the default strategy for this tournament type")
-            
-            min_salary = st.slider("Minimum Salary to Use", min_value=40000, max_value=50000, value=48000, step=500, help="Don't leave too much salary on the table")
+            min_salary = st.slider("Min Salary to Use", min_value=45000, max_value=50000, value=48500, step=100)
         
+        # Map ownership strategy override
         if ownership_strategy == "Full Chalk":
             contest_code = "CASH"
         elif ownership_strategy == "Contrarian":
-            contest_code = "LARGE_GPP"
+            contest_code = "20MAX"
         elif ownership_strategy == "Max Leverage":
             contest_code = "LARGE_GPP"
         else:
             contest_code = tournament_config['code']
         
         st.divider()
-        st.subheader("Paste Player Pool Data (CSV Format)")
+        st.subheader("📊 Load Player Data")
         
         pasted_csv_data = st.text_area("Copy your player pool data (including headers) and paste it here:", height=200, placeholder="Player\tSalary\tPosition\tTeam\tOpponent\tMinutes\tFPPM\tProjection\tValue\tOwnership")
         
