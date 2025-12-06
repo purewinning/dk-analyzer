@@ -1410,28 +1410,7 @@ def tab_results_analysis(slate_df, template):
             else:
                 st.info("⚠️ Some players in your lineups don't have actual results yet. Load complete results to see performance.")
         else:
-            st.info("💡 Generate lineups in the 'Lineup Builder' tab first, then come back here after games finish to see how they performed!")       # Show the players in that lineup
-                best_lineup_player_ids = lineups[best_lineup_num]['player_ids']
-                best_lineup_detail = results_df[results_df['player_id'].isin(best_lineup_player_ids)][
-                    ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'own_proj', 'actual_own']
-                ].copy()
-                
-                best_lineup_detail['pts_diff'] = best_lineup_detail['actual_pts'] - best_lineup_detail['proj']
-                
-                st.dataframe(
-                    best_lineup_detail.style.format({
-                        'salary': '${:,}',
-                        'proj': '{:.1f}',
-                        'actual_pts': '{:.1f}',
-                        'pts_diff': '{:+.1f}',
-                        'own_proj': '{:.1f}%',
-                        'actual_own': '{:.1f}%'
-                    }),
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else:
-                st.info("Load actual results for all players in your lineups to see performance.")
+            st.info("💡 Generate lineups in the 'Lineup Builder' tab first, then come back here after games finish to see how they performed!")
 
 
 def tab_contest_analyzer(slate_df, template):
