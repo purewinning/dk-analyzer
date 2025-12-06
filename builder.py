@@ -255,7 +255,6 @@ def run_monte_carlo_simulations(
     for i in range(num_iterations):
         
         # Sample new projections N(mu, sigma)
-        # The error occurs on the `.clip(lower=0.1)` call, confirming the array type is bad.
         sim_df['sampled_proj'] = np.random.normal(
             loc=sim_df['proj'], 
             scale=sim_df['std_dev']
