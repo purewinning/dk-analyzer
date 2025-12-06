@@ -1,5 +1,11 @@
 # builder.py (Replace the existing function with this one)
 
+# builder.py (Lines 1-5 should look like this)
+
+import pandas as pd  # <-- CRITICAL MISSING IMPORT
+from pulp import *
+from typing import Dict, List, Tuple, Union
+
 def build_optimal_lineup(
     slate_df: pd.DataFrame, 
     template: LineupTemplate, 
