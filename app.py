@@ -122,7 +122,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     
     # --- NEW: CALCULATE VALUE ---
     # Value = Projected Points / (Salary / 1000)
-    # Check for zero salary to prevent division by zero
     df['value'] = np.where(df['salary'] > 0, (df['proj'] / (df['salary'] / 1000)).round(2), 0.0)
 
     # Initialize UI Control Columns
@@ -154,11 +153,11 @@ def tab_lineup_builder(slate_df, template):
         "positions": st.column_config.TextColumn("Pos", disabled=True), 
         "salary": st.column_config.NumberColumn("Salary", format="$%d"), 
         "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), 
-        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True), # NEW
+        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True), 
         "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), 
         "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), 
         "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), 
-        "Max_Exposure": st.column_config.NumberColumn("Max Exposure (%)", min_value=0, max_value=100, default=100, format="%d%%", help="Max % of final lineups player can appear in."), # MOVED
+        "Max_Exposure": st.column_config.NumberColumn("Max Exposure (%)", min_value=0, max_value=100, default=100, format="%d%%", help="Max % of final lineups player can appear in."),
         "player_id": None, "GameID": None, "Team": None, "Opponent": None
     }
     
@@ -215,6 +214,18 @@ def tab_lineup_builder(slate_df, template):
     if run_btn:
         final_df = edited_df.copy()
         
+        # --- CRITICAL FIX: ENSURE PROJ IS A PURE FLOAT TYPE ---
+        # Data edited in st.data_editor must be explicitly converted to standard float64 
+        # for NumPy to avoid type errors during sampling.
+        try:
+            final_df['proj'] = final_df['proj'].astype(np.float64)
+            # Ensure salary is int for budget logic, but clean its type
+            final_df['salary'] = final_df['salary'].astype(int) 
+        except Exception as e:
+            st.error(f"Data type conversion failed before simulation: {e}")
+            return
+        # --------------------------------------------------------
+        
         # Recalculate buckets based on potentially edited ownership
         final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
         
@@ -260,7 +271,7 @@ def tab_simulation_results(slate_df):
         st.subheader(f"Player Exposure ({len(final_lineups)} Lineups)")
 
         # --- A. EXPOSURE TABLE ---
-        exposure_df = edited_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'player_id']].copy() # ADDED 'value'
+        exposure_df = edited_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'player_id']].copy() 
         exposure_df['Exposure_Pct'] = exposure_df['player_id'].map(final_exposures).fillna(0).round(1)
         
         # Calculate Over-Exposed/Under-Exposed Status
@@ -272,12 +283,12 @@ def tab_simulation_results(slate_df):
         
         exposure_df.sort_values(by='Exposure_Pct', ascending=False, inplace=True)
         
-        exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']] # ADDED 'value'
+        exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']] 
         
         st.dataframe(
             exposure_df_display.style.format({
                 "proj": "{:.1f}", 
-                "value": "{:.2f}", # New format for value
+                "value": "{:.2f}", 
                 "own_proj": "{:.1f}%", 
                 "Max_Exposure": "{:.0f}%", 
                 "Exposure_Pct": "{:.1f}%"
@@ -305,9 +316,7 @@ def tab_simulation_results(slate_df):
         # 1. Assign Roster Position
         ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
         
-        # Match players to their required primary slot (this is still a HACK for display)
-        # For a truly accurate display, the solver must return the assigned slot.
-        # This implementation simply assigns the slots in order of the ROSTER_ORDER list.
+        # This is a HACK for display: Assign slots in order.
         lineup_df = lineup_df.head(8).assign(roster_position=ROSTER_ORDER)
 
         # 2. Sort the DataFrame by the custom position order
@@ -316,7 +325,7 @@ def tab_simulation_results(slate_df):
         lineup_df.sort_values(by='roster_position', inplace=True)
         
         # 3. Define display columns
-        display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'value', 'own_proj', 'bucket'] # ADDED 'value'
+        display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'value', 'own_proj', 'bucket'] 
         lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
         
         # 4. Rename the column for display
@@ -334,7 +343,7 @@ def tab_simulation_results(slate_df):
         
         # Display Lineup
         st.dataframe(
-            lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "value": "{:.2f}", "own_proj": "{:.1f}%"}), # ADDED 'value'
+            lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "value": "{:.2f}", "own_proj": "{:.1f}%"}), 
             use_container_width=True,
             hide_index=True 
         )
