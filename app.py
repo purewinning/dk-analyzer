@@ -1,4 +1,4 @@
-# app.py - FINAL FIX: ADDED MISSING COLON AFTER 'with col2'
+# app.py - FINAL FIX: TERMINATED STRING LITERAL IN color_bucket
 
 import pandas as pd 
 import numpy as np
@@ -154,8 +154,199 @@ if 'edited_df' not in st.session_state:
 def color_bucket(s):
     """Applies color to the 'CATEGORY' column based on the value."""
     if s == 'mega':
+        # --- FIXED UNTERMINATED STRING LITERAL HERE ---
         color = 'background-color: #9C3838; color: white'  
+        # ---------------------------------------------
     elif s == 'chalk':
         color = 'background-color: #A37F34; color: white' 
     elif s == 'mid':
-        color = 'background-color: #
+        color = 'background-color: #38761D; color: white'  
+    elif s == 'punt':
+        color = 'background-color: #3D85C6; color: white'  
+    else:
+        color = ''
+    return color
+# ----------------------------------------
+
+
+def display_multiple_lineups(slate_df, template, lineup_list):
+    """Function to display the top N optimized lineups with improved UI."""
+    
+    if not lineup_list:
+        st.error("❌ No valid lineups could be found that meet all constraints.")
+        st.warning("Try loosening your constraints or reducing the number of lineups requested.")
+        return
+    
+    # --- METRICS SECTION (UI Improvement) ---
+    best_lineup_data = lineup_list[0]
+    best_proj = best_lineup_data['proj_score']
+    
+    best_lineup_players_df = slate_df[slate_df['player_id'].isin(best_lineup_data['player_ids'])]
+    best_salary = best_lineup_players_df['salary'].sum()
+    best_value = best_proj / (best_salary / 1000) if best_salary else 0
+    
+    st.subheader("🚀 Top Lineup Metrics (Lineup 1)")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(label="Total Projected Points", 
+                  value=f"{best_proj:.2f}", 
+                  delta="Optimal Lineup Score")
+    with col2:
+        st.metric(label="Salary Used", 
+                  value=f"${best_salary:,}", 
+                  delta=f"${template.salary_cap - best_salary:,} Remaining")
+    with col3:
+        st.metric(label="Projection Value (X)", 
+                  value=f"{best_value:.2f}", 
+                  delta="Points per $1,000")
+
+    st.markdown("---") 
+
+    # --- SUMMARY TABLE ---
+    st.subheader("📋 Top Lineups Summary")
+    
+    summary_data = []
+    
+    for i, lineup_data in enumerate(lineup_list):
+        lineup_players_df = slate_df[slate_df['player_id'].isin(lineup_data['player_ids'])]
+        summary_data.append({
+            'Lineup': i + 1,
+            'Total Proj': lineup_data['proj_score'],
+            'Salary Used': lineup_players_df['salary'].sum(),
+            'Games Used': lineup_players_df['GameID'].nunique()
+        })
+        
+    summary_df = pd.DataFrame(summary_data).set_index('Lineup')
+    
+    st.dataframe(
+        summary_df.style.format({"Total Proj": "{:.2f}", "Salary Used": "${:,}"}), 
+        use_container_width=True
+    )
+    
+    st.subheader("🔎 Lineup Detail View")
+    
+    # User selection for detailed lineup
+    lineup_options = [f"Lineup {i+1} (Proj: {lineup_list[i]['proj_score']:.2f})" for i in range(len(lineup_list))]
+    lineup_selection = st.selectbox("Select Lineup for Detail View", options=lineup_options)
+    
+    lineup_index = lineup_options.index(lineup_selection)
+    selected_lineup_data = lineup_list[lineup_index]
+    selected_lineup_ids = selected_lineup_data['player_ids']
+
+    # Rebuild the dataframe for display
+    lineup_df = slate_df[slate_df['player_id'].isin(selected_lineup_ids)].copy()
+    
+    # 1. Assign Roster Position (HACK for display)
+    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+    lineup_df = lineup_df.head(8).assign(roster_position=ROSTER_ORDER) 
+
+    # 2. Sort the DataFrame by the custom position order
+    position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
+    lineup_df['roster_position'] = lineup_df['roster_position'].astype(position_type)
+    lineup_df.sort_values(by='roster_position', inplace=True)
+    
+    # 3. Define display columns
+    display_cols = ['roster_position', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
+    lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
+    
+    # 4. Rename the column for display
+    lineup_df_display.rename(columns={'roster_position': 'SLOT', 'positions': 'POS', 'own_proj': 'OWN%', 'Minutes': 'MIN', 'FPPM': 'FP/M', 'bucket': 'CATEGORY'}, inplace=True)
+    
+    # Display the detailed lineup with styling
+    styled_lineup_df = lineup_df_display.style.applymap(
+        color_bucket, subset=['CATEGORY']
+    ).format({
+        "salary": "${:,}", 
+        "proj": "{:.1f}", 
+        "value": "{:.2f}", 
+        "OWN%": "{:.1f}%", 
+        "MIN": "{:.1f}", 
+        "FP/M": "{:.2f}"
+    })
+    
+    st.dataframe(
+        styled_lineup_df, 
+        use_container_width=True,
+        hide_index=True 
+    )
+
+
+def tab_lineup_builder(slate_df, template):
+    """Render the Interactive Lineup Builder and run the multi-lineup Optimizer."""
+    st.header(f"1. Player Pool & Constraints for **{template.contest_label}**")
+    
+    # --- A. PLAYER POOL EDITOR ---
+    st.markdown("Use the table to **🔒 Lock** or **❌ Exclude** players. The **Category** column shows ownership risk.")
+    
+    column_config = {
+        "Name": st.column_config.TextColumn("Player", disabled=True), 
+        "bucket": st.column_config.TextColumn("Category", disabled=True, help="punt (<10%), mid (10-30%), chalk (30-40%), mega (>40%)", width="small"),
+        "positions": st.column_config.TextColumn("Pos", disabled=True), 
+        "Team": st.column_config.TextColumn("Team", disabled=True, width="small"), 
+        "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
+        "salary": st.column_config.NumberColumn("Salary", format="$%d", width="small"), 
+        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f", width="small"), 
+        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), 
+        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f%%", width="small"),
+        "Minutes": st.column_config.NumberColumn("Min", format="%.1f", width="small"),
+        "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
+        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup", width="small"), 
+        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup", width="small"), 
+        "player_id": None, "GameID": None 
+    }
+    
+    column_order = [
+        'Lock', 'Exclude', 'Name', 'bucket', 'positions', 'Team', 'Opponent', 
+        'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM'
+    ]
+    
+    df_for_editor = slate_df.copy()
+    
+    if df_for_editor.empty:
+        st.info("✍️ Paste your player data into the text area in the sidebar and click the button to load the pool.")
+        
+        blank_df = pd.DataFrame(columns=column_order)
+        edited_df = st.data_editor(
+            blank_df, 
+            column_config=column_config,
+            column_order=column_order, 
+            hide_index=True,
+            use_container_width=True,
+            height=200, 
+            key="player_editor_blank"
+        )
+        st.session_state['edited_df'] = blank_df
+        st.markdown("---")
+        st.header("2. Find Optimal Lineups")
+        st.info("Optimization controls will be enabled once data is loaded.")
+        st.markdown("---")
+        st.header("3. Top 10 Lineups")
+        st.info("Lineup results will appear here.")
+        return 
+
+    df_for_editor = df_for_editor[column_order + ['player_id', 'GameID']]
+    
+    edited_df = st.data_editor(
+        df_for_editor, 
+        column_config=column_config,
+        column_order=column_order, 
+        hide_index=True,
+        use_container_width=True,
+        height=400,
+        key="player_editor_final"
+    )
+    st.session_state['edited_df'] = edited_df
+    
+    edited_df['player_id'] = edited_df['player_id'].astype(str)
+    
+    locked_player_ids = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
+    excluded_player_ids = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
+
+    if locked_player_ids or excluded_player_ids:
+        st.caption(f"🔒 **Locked:** {len(locked_player_ids)} | ❌ **Excluded:** {len(excluded_player_ids)}")
+
+    st.markdown("---")
+    
+    # --- B
