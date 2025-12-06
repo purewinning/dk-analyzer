@@ -651,64 +651,76 @@ def display_multiple_lineups(slate_df, template, lineup_list):
 def tab_lineup_builder(slate_df, template):
     """Render the Interactive Lineup Builder and run the multi-lineup Optimizer."""
     
+    # Get tournament settings from session state
+    tournament_type = st.session_state.get('tournament_type', 'Single Entry GPP')
+    tournament_config = st.session_state.get('tournament_config', {})
+    contest_code = st.session_state.get('contest_code', 'SE')
+    
     # Tournament Strategy Guide at the top
-    if 'tournament_type' in st.session_state and 'tournament_config' in st.session_state:
-        tournament_type = st.session_state['tournament_type']
-        tournament_config = st.session_state['tournament_config']
+    st.markdown(f"## 🎯 {tournament_type}")
+    
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
+    with col1:
+        st.markdown(f"**Strategy:** {tournament_config.get('description', 'N/A')}")
+        st.caption(f"Field Size: ~{tournament_config.get('field_size', 0):,} entries")
+    
+    with col2:
+        payout_pct = tournament_config.get('top_payout_pct', 0.01) * 100
+        st.markdown(f"**Payout Structure:** Top {payout_pct:.2f}% pays")
         
-        # Create visual tournament guide
-        st.markdown(f"## 🎯 {tournament_type}")
+        if payout_pct >= 40:
+            st.caption("🟢 High cash rate - prioritize floor/consistency")
+        elif payout_pct >= 10:
+            st.caption("🟡 Medium cash rate - balance floor and ceiling")
+        else:
+            st.caption("🔴 Low cash rate - prioritize ceiling/leverage")
+    
+    with col3:
+        rec_lineups = tournament_config.get('recommended_lineups', 1)
+        if rec_lineups == 1:
+            st.metric("Entries", "1", delta="Single entry")
+        else:
+            st.metric("Max Entries", rec_lineups)
+    
+    # Show recommended construction based on tournament type
+    if contest_code in TOURNAMENT_OWNERSHIP_TEMPLATES:
+        template_info = TOURNAMENT_OWNERSHIP_TEMPLATES[contest_code]
+        targets = template_info['ownership_targets']
         
-        col1, col2, col3 = st.columns([2, 2, 1])
-        
-        with col1:
-            st.markdown(f"**Strategy:** {tournament_config['description']}")
-            st.caption(f"Field Size: ~{tournament_config['field_size']:,} entries")
-        
-        with col2:
-            payout_pct = tournament_config['top_payout_pct'] * 100
-            st.markdown(f"**Payout Structure:** Top {payout_pct:.2f}% pays")
+        with st.expander("📋 Recommended Ownership Construction"):
+            st.markdown(f"**{template_info['name']}** - {template_info['description']}")
             
-            if payout_pct >= 40:
-                st.caption("🟢 High cash rate - prioritize floor/consistency")
-            elif payout_pct >= 10:
-                st.caption("🟡 Medium cash rate - balance floor and ceiling")
-            else:
-                st.caption("🔴 Low cash rate - prioritize ceiling/leverage")
-        
-        with col3:
-            if tournament_config['recommended_lineups'] == 1:
-                st.metric("Entries", "1", delta="Single entry")
-            else:
-                st.metric("Max Entries", tournament_config['recommended_lineups'])
-        
-        # Show recommended construction based on tournament type
-        if tournament_type in TOURNAMENT_OWNERSHIP_TEMPLATES:
-            template_info = TOURNAMENT_OWNERSHIP_TEMPLATES[st.session_state.get('contest_code', 'SE')]
-            targets = template_info['ownership_targets']
+            construction_df = pd.DataFrame({
+                'Bucket': ['Punt (<10%)', 'Mid (10-30%)', 'Chalk (30-40%)', 'Mega (>40%)'],
+                'Target Range': [
+                    f"{targets['punt'][0]}-{targets['punt'][1]}",
+                    f"{targets['mid'][0]}-{targets['mid'][1]}",
+                    f"{targets['chalk'][0]}-{targets['chalk'][1]}",
+                    f"{targets['mega'][0]}-{targets['mega'][1]}"
+                ],
+                'Strategy': [
+                    '🔵 Low owned leverage plays',
+                    '🟢 Solid mid-tier value',
+                    '🟡 Popular but good plays',
+                    '🔴 Ultra-chalk stars'
+                ]
+            })
             
-            with st.expander("📋 Recommended Ownership Construction"):
-                st.markdown(f"**{template_info['name']}** - {template_info['description']}")
-                
-                construction_df = pd.DataFrame({
-                    'Bucket': ['Punt (<10%)', 'Mid (10-30%)', 'Chalk (30-40%)', 'Mega (>40%)'],
-                    'Target Range': [
-                        f"{targets['punt'][0]}-{targets['punt'][1]}",
-                        f"{targets['mid'][0]}-{targets['mid'][1]}",
-                        f"{targets['chalk'][0]}-{targets['chalk'][1]}",
-                        f"{targets['mega'][0]}-{targets['mega'][1]}"
-                    ],
-                    'Strategy': [
-                        '🔵 Low owned leverage plays',
-                        '🟢 Solid mid-tier value',
-                        '🟡 Popular but good plays',
-                        '🔴 Ultra-chalk stars'
-                    ]
-                })
-                
-                st.table(construction_df)
-        
-        st.markdown("---")
+            st.table(construction_df)
+            
+            # Show what this means
+            st.info(f"""
+            **What this means for {tournament_type}:**
+            
+            Your lineups will target:
+            - **{targets['punt'][0]}-{targets['punt'][1]}** punt plays (under 10% owned - high leverage)
+            - **{targets['mid'][0]}-{targets['mid'][1]}** mid-tier plays (10-30% owned - balanced)
+            - **{targets['chalk'][0]}-{targets['chalk'][1]}** chalk plays (30-40% owned - popular picks)
+            - **{targets['mega'][0]}-{targets['mega'][1]}** mega chalk (over 40% - ultra popular)
+            """)
+    
+    st.markdown("---")
     
     st.header(f"1. Player Pool & Constraints")
     
@@ -789,29 +801,47 @@ def tab_lineup_builder(slate_df, template):
     st.header("2. Find Optimal Lineups")
     
     # Show tournament-specific recommendations
-    if 'tournament_config' in st.session_state:
-        tournament_config = st.session_state['tournament_config']
-        
-        st.info(f"""
-        **Tournament Type:** {st.session_state.get('tournament_type', 'Unknown')}
-        
-        **Recommended Strategy:**
-        - Generate **{tournament_config['recommended_lineups']}** lineup(s)
-        - Field size: ~{tournament_config['field_size']:,} entries
-        - {tournament_config['description']}
-        """)
+    tournament_config = st.session_state.get('tournament_config', {})
+    recommended_n = tournament_config.get('recommended_lineups', 10)
+    
+    st.info(f"""
+    **💡 Recommendation for {tournament_type}:**
+    - Generate **{recommended_n}** lineup(s) for this tournament type
+    - Field size: ~{tournament_config.get('field_size', 10000):,} entries  
+    - {tournament_config.get('description', '')}
+    """)
     
     col_n, col_slack = st.columns(2)
     
     with col_n:
-        n_lineups = st.slider("Number of Lineups to Generate (N)", 
-                              min_value=1, max_value=150, value=10, step=1,
-                              help="The optimizer will find the N highest projected, unique lineups that meet all constraints.")
+        # Set default to recommended number
+        default_n = min(recommended_n, 20)
+        n_lineups = st.slider(
+            "Number of Lineups to Generate (N)", 
+            min_value=1, 
+            max_value=150, 
+            value=default_n, 
+            step=1,
+            help=f"Recommended: {recommended_n} for {tournament_type}"
+        )
     
     with col_slack:
-        slack = st.slider("Ownership Target Slack (Flexibility)", 
-                          min_value=0, max_value=4, value=1, step=1,
-                          help="Higher slack allows the optimizer to deviate more from the template's target player counts for each ownership bucket to find a higher projected score.")
+        # Adjust default slack based on tournament type
+        if contest_code == "CASH":
+            default_slack = 0  # Cash games should be strict
+        elif contest_code == "LARGE_GPP":
+            default_slack = 2  # Large field needs more flexibility
+        else:
+            default_slack = 1
+            
+        slack = st.slider(
+            "Ownership Target Slack (Flexibility)", 
+            min_value=0, 
+            max_value=4, 
+            value=default_slack, 
+            step=1,
+            help="Higher slack allows more deviation from ownership targets. Cash games use 0, GPPs use 1-2."
+        )
     
     # Multi-entry exposure controls
     if n_lineups > 1:
@@ -1783,16 +1813,11 @@ if __name__ == '__main__':
                     else:
                         st.error("❌ Failed to load data. Check the format and try again.")
             else:
-                st.warning("⚠️ Please paste some data first!")
-    
-    # Store tournament config in session state
-    if 'tournament_type' not in st.session_state:
-        st.session_state['tournament_type'] = tournament_type
-        st.session_state['tournament_config'] = tournament_config
-    else:
-        if st.session_state['tournament_type'] != tournament_type:
-            st.session_state['tournament_type'] = tournament_type
-            st.session_state['tournament_config'] = tournament_config
+    # Store tournament config in session state BEFORE processing data
+    st.session_state['tournament_type'] = tournament_type
+    st.session_state['tournament_config'] = tournament_config
+    st.session_state['contest_code'] = contest_code
+    st.session_state['ownership_strategy'] = ownership_strategy
     
     # Initialize slate_df from session state
     if 'slate_df' not in st.session_state:
@@ -1800,11 +1825,11 @@ if __name__ == '__main__':
     
     slate_df = st.session_state['slate_df']
     
-    # Build template
+    # Build template using the contest code from sidebar
     template = build_template_from_params(
         contest_type=contest_code,
-        field_size=1000,
-        pct_to_first=1.0,
+        field_size=tournament_config['field_size'],
+        pct_to_first=tournament_config['top_payout_pct'],
         roster_size=DEFAULT_ROSTER_SIZE,
         salary_cap=DEFAULT_SALARY_CAP,
         min_games=MIN_GAMES_REQUIRED
