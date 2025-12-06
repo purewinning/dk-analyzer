@@ -236,8 +236,14 @@ def run_monte_carlo_simulations(
     
     # --- CRITICAL FIX: ENSURE ALL NUMERICAL COLUMNS ARE FLOAT ---
     # Convert core projection and salary columns to float64 for NumPy compatibility
-    sim_df['proj'] = sim_df['proj'].astype(np.float64)
-    sim_df['salary'] = sim_df['salary'].astype(np.float64)
+    # If the app.py casting failed, this re-cast ensures NumPy sees pure floats.
+    try:
+        sim_df['proj'] = sim_df['proj'].astype(np.float64)
+        sim_df['salary'] = sim_df['salary'].astype(np.float64)
+    except Exception as e:
+        # Should be caught in app.py, but this is a final failsafe
+        print(f"ERROR: Final float conversion failed in builder.py: {e}") 
+        return [], {}
     
     # 1. PRE-CALCULATE STATISTICAL VARIANCE
     sim_df['std_dev'] = sim_df['proj'] * DEFAULT_STD_DEV_PCT
@@ -250,6 +256,7 @@ def run_monte_carlo_simulations(
     for i in range(num_iterations):
         
         # Sample new projections N(mu, sigma)
+        # The error occurs on the `.clip(lower=0.1)` call.
         sim_df['sampled_proj'] = np.random.normal(
             loc=sim_df['proj'], 
             scale=sim_df['std_dev']
