@@ -1743,6 +1743,8 @@ if __name__ == '__main__':
         
         # Advanced settings expander
         with st.expander("⚙️ Advanced Tournament Settings"):
+            ownership_strategy = "Balanced"  # Default value
+            
             if tournament_type == "Custom":
                 custom_field_size = st.number_input(
                     "Field Size",
@@ -1780,6 +1782,16 @@ if __name__ == '__main__':
                 step=500,
                 help="Don't leave too much salary on the table"
             )
+        
+        # Map ownership strategy to contest code (moved outside the expander)
+        if ownership_strategy == "Full Chalk":
+            contest_code = "CASH"
+        elif ownership_strategy == "Contrarian":
+            contest_code = "LARGE_GPP"
+        elif ownership_strategy == "Max Leverage":
+            contest_code = "LARGE_GPP"
+        else:
+            contest_code = tournament_config['code']
         
         # Map ownership strategy to contest code
         if ownership_strategy == "Full Chalk":
