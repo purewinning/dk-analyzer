@@ -158,9 +158,7 @@ def tab_lineup_builder(slate_df, template):
         "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), 
         "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), 
         "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), 
-        # --- SYNTAX FIX IS HERE ---
         "Max_Exposure": st.column_config.NumberColumn("Max Exposure (%)", min_value=0, max_value=100, default=100, format="%d%%", help="Max % of final lineups player can appear in."),
-        
         "player_id": None, "GameID": None, "Team": None, "Opponent": None
     }
     
@@ -217,8 +215,9 @@ def tab_lineup_builder(slate_df, template):
     if run_btn:
         final_df = edited_df.copy()
         
-        # --- CRITICAL FIX: TYPE CASTING FOR NUMPY/PULP ---
-        # Explicitly cast proj and salary to np.float64 to prevent NumPy type errors.
+        # --- CRITICAL FIX: TYPE CASTING FOR NUMPY/PULP (Reinforced) ---
+        # Explicitly cast proj and salary to np.float64 for NumPy compatibility.
+        # This is kept here for data editor stability, even though builder.py does it again.
         try:
             final_df['proj'] = final_df['proj'].astype(np.float64)
             final_df['salary'] = final_df['salary'].astype(np.float64).astype(int)
@@ -244,7 +243,7 @@ def tab_lineup_builder(slate_df, template):
                 max_exposures=max_exposures,
                 bucket_slack=1,
                 locked_player_ids=locked_players,
-                excluded_player_ids=excluded_players,
+                excluded_player_ids=excluded_player_ids,
                 min_lineup_diversity=diversity
             )
         
