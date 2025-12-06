@@ -92,7 +92,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
                 df['salary'] = df['salary'].astype(int) 
                 df['proj'] = df['proj'].astype(float)
             except Exception as e:
-                # This block is now correctly indented
                 st.error(f"Failed final conversion (Salary/Projection): {e}")
                 return pd.DataFrame()
             
@@ -291,6 +290,7 @@ def tab_simulation_results(slate_df):
         
         exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']] 
         
+        # 🛑 FIX: Ensure the st.dataframe() call has the correct closing structure.
         st.dataframe(
             exposure_df_display.style.format({
                 "proj": "{:.1f}", 
@@ -349,3 +349,78 @@ def tab_simulation_results(slate_df):
         
         # Display Lineup
         st.dataframe(
+            lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "value": "{:.2f}", "own_proj": "{:.1f}%"}), 
+            use_container_width=True,
+            hide_index=True 
+        )
+
+    else:
+        st.info("Run the simulation on the 'Lineup Builder' tab first to see results here.")
+
+
+def tab_contest_analyzer(slate_df, template):
+    """Render the Contest Analyzer."""
+    st.header("Contest Strategy Analyzer")
+    st.info(f"Analysis based on: **{template.contest_label}**")
+
+    st.subheader("Target Ownership Structure")
+    ranges = template.bucket_ranges(slack=1) 
+    
+    range_data = {
+        "Ownership Bucket": ["Punt (<10%)", "Mid (10-30%)", "Chalk (30-40%)", "Mega Chalk (>40%)"],
+        "Target Player Count": [
+            f"{ranges['punt'][0]}-{ranges['punt'][1]}",
+            f"{ranges['mid'][0]}-{ranges['mid'][1]}",
+            f"{ranges['chalk'][0]}-{ranges['chalk'][1]}",
+            f"{ranges['mega'][0]}-{ranges['mega'][1]}"
+        ]
+    }
+    st.table(pd.DataFrame(range_data))
+
+    st.subheader("Your Player Pool Distribution")
+    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
+    st.bar_chart(pool_counts)
+
+
+# --- 4. MAIN ENTRY POINT ---
+
+if __name__ == '__main__':
+    st.set_page_config(layout="wide", page_title="DK Lineup Builder")
+    
+    # Sidebar
+    with st.sidebar:
+        st.title("🏀 DK Lineup Sim")
+        st.caption("Monte Carlo & Max Exposure")
+        contest_type = st.selectbox("Contest Strategy", ['GPP (Single Entry)', 'GPP (Large Field)', 'CASH'])
+        
+        # Map selection
+        c_map = {'GPP (Single Entry)': 'SE', 'GPP (Large Field)': 'LARGE_GPP', 'CASH': 'CASH'}
+        contest_code = c_map[contest_type]
+        
+        st.divider()
+        uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
+        
+    # Load Data
+    slate_df = load_and_preprocess_data(uploaded_file)
+    if slate_df.empty:
+        st.stop()
+        
+    # Build Template
+    template = build_template_from_params(
+        contest_type=contest_code, 
+        field_size=10000, 
+        pct_to_first=30.0,
+        roster_size=DEFAULT_ROSTER_SIZE,
+        salary_cap=DEFAULT_SALARY_CAP,
+        min_games=MIN_GAMES_REQUIRED
+    )
+
+    # Tabs
+    t1, t2, t3 = st.tabs(["🚀 Lineup Builder & Sim", "📊 Exposure & Results", "📝 Contest Analyzer"])
+    
+    with t1:
+        tab_lineup_builder(slate_df, template)
+    with t2:
+        tab_simulation_results(slate_df)
+    with t3:
+        tab_contest_analyzer(slate_df, template)
