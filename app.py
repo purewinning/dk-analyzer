@@ -827,6 +827,9 @@ def tab_strategy_lab(slate_df, template):
             # Format and display
             display_df = results_df.copy()
             
+            # Sort by leverage score for better display
+            display_df = display_df.sort_values('Leverage Score', ascending=False)
+            
             # Color code by strategy
             def color_strategy(val):
                 if val == "Chalk Heavy":
@@ -838,8 +841,17 @@ def tab_strategy_lab(slate_df, template):
                 else:
                     return 'background-color: #A37F34; color: white'
             
+            # Highlight best leverage score
+            def highlight_best_leverage(s):
+                if s.name == 'Leverage Score':
+                    max_val = s.max()
+                    return ['background-color: #90EE90' if v == max_val else '' for v in s]
+                return ['' for _ in s]
+            
             styled_df = display_df.style.applymap(
                 color_strategy, subset=['Strategy']
+            ).apply(
+                highlight_best_leverage, axis=0
             ).format({
                 'Win Rate %': '{:.3f}%',
                 'Top 10% Rate': '{:.2f}%',
@@ -848,10 +860,7 @@ def tab_strategy_lab(slate_df, template):
                 'Floor (10th)': '{:.1f}',
                 'Avg Own %': '{:.1f}%',
                 'Leverage Score': '{:.1f}'
-            }).background_gradient(
-                subset=['Leverage Score'], 
-                cmap='RdYlGn'
-            )
+            })
             
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
             
@@ -873,12 +882,28 @@ def tab_strategy_lab(slate_df, template):
             # Pattern breakdown
             pattern_cols = ['Lineup', 'Strategy', 'Mega Chalk', 'Chalk', 'Mid', 'Punt', 'Leverage Score']
             pattern_df = results_df[pattern_cols].copy()
+            pattern_df = pattern_df.sort_values('Leverage Score', ascending=False)
+            
+            # Highlight top 3 leverage scores
+            def highlight_top_leverage(s):
+                if s.name == 'Leverage Score':
+                    sorted_vals = s.sort_values(ascending=False)
+                    top_3 = sorted_vals.head(3).values
+                    colors = []
+                    for v in s:
+                        if v == top_3[0]:
+                            colors.append('background-color: #90EE90; font-weight: bold')
+                        elif len(top_3) > 1 and v == top_3[1]:
+                            colors.append('background-color: #C1FFC1')
+                        elif len(top_3) > 2 and v == top_3[2]:
+                            colors.append('background-color: #E0FFE0')
+                        else:
+                            colors.append('')
+                    return colors
+                return ['' for _ in s]
             
             st.dataframe(
-                pattern_df.style.background_gradient(
-                    subset=['Leverage Score'], 
-                    cmap='Greens'
-                ),
+                pattern_df.style.apply(highlight_top_leverage, axis=0),
                 use_container_width=True,
                 hide_index=True
             )
