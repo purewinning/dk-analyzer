@@ -1,4 +1,4 @@
-# app.py - FINAL COMPLETE CODE (Placeholder Removed)
+# app.py - FINAL COMPLETE CODE (Header Fix v2)
 
 import pandas as pd 
 import numpy as np
@@ -17,26 +17,32 @@ from builder import (
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
 
-# --- HEADER MAPPING (Comprehensive to handle different capitalization/symbols) ---
+# --- HEADER MAPPING (Optimized for All-Caps Headers from your source) ---
 REQUIRED_CSV_TO_INTERNAL_MAP = {
     # Salary
     'SALARY': 'salary', 
-    'Salary': 'salary', 
+    'Salary': 'salary', # Keeping standard case as backup
+    
     # Position
     'POSITION': 'positions', 
     'Position': 'positions',
+    
     # Projection
-    'PROJECTED FP': 'proj',   
+    'PROJECTED FP': 'proj',   # Exact match from image
     'Projection': 'proj',
+    
     # Ownership
-    'OWNERSHIP%': 'own_proj',  
+    'OWNERSHIP%': 'own_proj',  # Exact match from image
     'Ownership': 'own_proj',
+    
     # Player
     'PLAYER': 'Name',
     'Player': 'Name',
+    
     # Team
     'TEAM': 'Team',
     'Team': 'Team',
+    
     # Opponent
     'OPPONENT': 'Opponent',
     'Opponent': 'Opponent',
@@ -58,44 +64,55 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-            st.success("✅ Data loaded successfully.")
+            st.success("✅ Data loaded successfully. Checking headers...")
             
-            # --- VALIDATE AND MAP REQUIRED COLUMNS ---
+            # --- Robust Header Validation and Mapping ---
+            # 1. Clean the CSV headers of any accidental leading/trailing whitespace
+            df.columns = df.columns.str.strip() 
+
             internal_to_possible_csv = {
-                'salary': ['Salary', 'SALARY'],
-                'positions': ['Position', 'POSITION'],
-                'proj': ['Projection', 'PROJECTED FP'],
-                'own_proj': ['Ownership', 'OWNERSHIP%'],
-                'Name': ['Player', 'PLAYER'],
-                'Team': ['Team', 'TEAM'],
-                'Opponent': ['Opponent', 'OPPONENT']
+                'salary': ['SALARY', 'Salary'],
+                'positions': ['POSITION', 'Position'],
+                'proj': ['PROJECTED FP', 'Projection'],
+                'own_proj': ['OWNERSHIP%', 'Ownership'],
+                'Name': ['PLAYER', 'Player'],
+                'Team': ['TEAM', 'Team'],
+                'Opponent': ['OPPONENT', 'Opponent']
             }
             
             actual_map = {}
+            missing_internal_cols = []
+            
             for internal_name, possible_names in internal_to_possible_csv.items():
                 found = False
                 for name in possible_names:
+                    # Check if the cleaned column name exists in the DataFrame
                     if name in df.columns:
                         actual_map[name] = internal_name
                         found = True
                         break
                 
                 if not found and internal_name in CORE_INTERNAL_COLS:
-                    st.error(f"Missing essential headers. Could not find a match for '{internal_name}'.")
-                    st.error("Please ensure your CSV contains one of the following columns for each field: Player/PLAYER, Salary/SALARY, Position/POSITION, Projection/PROJECTED FP, Ownership/OWNERSHIP%, Team/TEAM, Opponent/OPPONENT.")
-                    return pd.DataFrame()
+                    missing_internal_cols.append(internal_name)
 
+            if missing_internal_cols:
+                # If required columns are missing, show a detailed error
+                st.error(f"Missing essential headers: Could not find a match for {', '.join(missing_internal_cols)}.")
+                st.error("Please ensure your CSV contains: Player/PLAYER, Salary/SALARY, Position/POSITION, Projected FP/Projection, Ownership/OWNERSHIP%, Team/TEAM, Opponent/OPPONENT.")
+                return pd.DataFrame()
+
+            # Rename columns using the filtered, actual map
             df.rename(columns=actual_map, inplace=True)
             
-            # --- CREATE GameID ---
+            # --- CREATE GameID and PlayerID ---
             df['Team'] = df['Team'].astype(str)
             df['Opponent'] = df['Opponent'].astype(str)
             df['GameID'] = df.apply(
                 lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1
             )
+            df['player_id'] = df['Name'] 
             
             # --- CLEANUP & STANDARDIZE ---
-            df['player_id'] = df['Name'] 
             
             # Clean Ownership
             df['own_proj'] = df['own_proj'].astype(str).str.replace('%', '', regex=False).str.replace(',', '.', regex=False)
@@ -118,6 +135,8 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
                 
                 # Handle other columns dynamically
                 df_columns = df.columns.tolist()
+                
+                # Checking for Minute/FPPM/Value columns by their internal names after mapping
                 if 'Minutes' in df_columns:
                     df['Minutes'] = pd.to_numeric(df.get('Minutes', 0), errors='coerce').astype(float).round(2)
                 if 'FPPM' in df_columns:
@@ -149,7 +168,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     
     return df
 
-# --- 2. TAB FUNCTIONS ---
+# --- 2. TAB FUNCTIONS (REMAINDER UNCHANGED) ---
 
 if 'optimal_lineups_results' not in st.session_state:
     st.session_state['optimal_lineups_results'] = {'lineups': [], 'ran': False}
@@ -161,13 +180,13 @@ if 'edited_df' not in st.session_state:
 def color_bucket(s):
     """Applies color to the 'CATEGORY' column based on the value."""
     if s == 'mega':
-        color = 'background-color: #9C3838; color: white'  # Dark Red/Brown
+        color = 'background-color: #9C3838; color: white'  
     elif s == 'chalk':
-        color = 'background-color: #A37F34; color: white'  # Dark Yellow/Gold
+        color = 'background-color: #A37F34; color: white' 
     elif s == 'mid':
-        color = 'background-color: #38761D; color: white'  # Dark Green
+        color = 'background-color: #38761D; color: white'  
     elif s == 'punt':
-        color = 'background-color: #3D85C6; color: white'  # Dark Blue
+        color = 'background-color: #3D85C6; color: white'  
     else:
         color = ''
     return color
@@ -439,7 +458,6 @@ if __name__ == '__main__':
         
     # Load Data
     slate_df = load_and_preprocess_data(uploaded_file)
-    # Note: We no longer stop the app if slate_df is empty, we just skip displaying the main content tabs.
         
     # Build Template
     template = build_template_from_params(
