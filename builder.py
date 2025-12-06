@@ -239,7 +239,6 @@ def run_monte_carlo_simulations(
     sim_df = slate_df.copy()
     
     # --- CRITICAL FIX: ENSURE ALL NUMERICAL COLUMNS ARE FLOAT ---
-    # Convert core projection and salary columns to float64 for NumPy compatibility
     try:
         # Use .values.astype to get a pure NumPy array first, then put back into DataFrame
         sim_df['proj'] = sim_df['proj'].values.astype(np.float64) 
@@ -258,10 +257,10 @@ def run_monte_carlo_simulations(
     # 2. RUN SIMULATIONS
     for i in range(num_iterations):
         
-        # FIX for RecursionError/NumPy array instability:
-        # Extract the underlying NumPy arrays for loc and scale and pass size.
-        loc_values = sim_df['proj'].values
-        scale_values = sim_df['std_dev'].values
+        # 🛑 REINFORCED FIX for RecursionError/NumPy array instability:
+        # Explicitly cast to float to ensure NumPy passes stable types to the underlying C-API.
+        loc_values = sim_df['proj'].values.astype(float)
+        scale_values = sim_df['std_dev'].values.astype(float)
         
         # Sample new projections N(mu, sigma)
         sim_df['sampled_proj'] = np.random.normal(
@@ -283,8 +282,6 @@ def run_monte_carlo_simulations(
         
         if lineup_ids:
             # Append the lineup IDs and the total projected score for this sim
-            # Use the original projection (raw_proj) here if calculating the final score
-            # But since we use temp_df['proj'], this is the sampled score. Keep it consistent.
             lineup_proj = temp_df[temp_df['player_id'].isin(lineup_ids)]['proj'].sum()
             
             raw_optimal_lineups.append({
