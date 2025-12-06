@@ -154,10 +154,9 @@ if 'edited_df' not in st.session_state:
 def color_bucket(s):
     """Applies color to the 'CATEGORY' column based on the value."""
     if s == 'mega':
-        # --- FIXED UNTERMINATED STRING LITERAL HERE ---
         color = 'background-color: #9C3838; color: white'  
-        # ---------------------------------------------
     elif s == 'chalk':
+        # *** THIS LINE WAS THE ISSUE ***
         color = 'background-color: #A37F34; color: white' 
     elif s == 'mid':
         color = 'background-color: #38761D; color: white'  
