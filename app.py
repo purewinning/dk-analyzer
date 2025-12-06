@@ -148,9 +148,49 @@ def tab_lineup_builder(slate_df, template):
     # --- A. PLAYER POOL EDITOR ---
     st.markdown("Use the table below to **Lock** (Force In), **Exclude** (Ban), or **Edit** projections.")
     
-    # Define column config for the editor
-    column_config = {
-        "Name": st.column_config.TextColumn("Player Name", disabled=True),
-        "positions": st.column_config.TextColumn("Pos", disabled=True),
-        "salary": st.column_config.NumberColumn("Salary", format="$%d"),
-        "proj": st.column
+    # Define column config for the editor (CONDENSED)
+    column_config = {"Name": st.column_config.TextColumn("Player Name", disabled=True), "positions": st.column_config.TextColumn("Pos", disabled=True), "salary": st.column_config.NumberColumn("Salary", format="$%d"), "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), "player_id": None, "GameID": None}
+    
+    # The Interactive Data Editor
+    edited_df = st.data_editor(
+        slate_df[['Lock', 'Exclude', 'Name', 'positions', 'salary', 'proj', 'own_proj', 'Team', 'Opponent', 'GameID', 'player_id']],
+        column_config=column_config,
+        hide_index=True,
+        use_container_width=True,
+        height=400,
+        key="player_editor"
+    )
+    
+    # Extract Locks and Excludes
+    locked_players = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
+    excluded_players = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
+    
+    if locked_players or excluded_players:
+        st.caption(f"🔒 **Locked:** {len(locked_players)} | ❌ **Excluded:** {len(excluded_players)}")
+
+    st.markdown("---")
+    
+    # --- B. SIMULATION SETTINGS ---
+    st.header("2. Generate Optimal Lineup")
+    
+    col_var, col_btn = st.columns([2, 1])
+    with col_var:
+        variance = st.slider("Randomize Projections (+/- %)", 0, 30, 0, help="Add randomness to 'simulate' a slate outcomes.")
+    
+    with col_btn:
+        st.write("") # Spacer
+        run_btn = st.button("🚀 Build Lineup", use_container_width=True)
+    
+    if run_btn:
+        # Apply variance if requested
+        final_df = edited_df.copy()
+        if variance > 0:
+            final_df = apply_variance(final_df, variance)
+            st.toast(f"Applied +/- {variance}% variance to projections.")
+            
+        # Recalculate buckets based on potentially edited ownership
+        final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
+
+        with st.spinner(f'Optimizing...'):
+            optimal_lineup_df = build_optimal_lineup(
+                slate_df=final_df,
