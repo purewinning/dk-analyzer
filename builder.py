@@ -1,8 +1,9 @@
 # builder.py
 
 import pandas as pd
+import numpy as np # <-- NEW REQUIREMENT
 from pulp import *
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Any
 
 # --- CONFIGURATION CONSTANTS ---
 PUNT_THR = 10.0
@@ -11,6 +12,7 @@ MEGA_CHALK_THR = 40.0
 
 DEFAULT_SALARY_CAP = 50000
 DEFAULT_ROSTER_SIZE = 8
+DEFAULT_STD_DEV_PCT = 0.20 # 20% of projection for standard deviation in MCS
 
 # --- 1. CONTEST TEMPLATES ---
 
@@ -83,7 +85,7 @@ def build_template_from_params(
     roster_size: int,
     salary_cap: int,
     min_games: int
-) -> LineupTemplate:
+) -> 'LineupTemplate':
     """Initializes and returns a LineupTemplate instance."""
     return LineupTemplate(
         contest_type=contest_type, 
@@ -105,16 +107,16 @@ def ownership_bucket(own_proj: float) -> str:
     else:
         return 'mega'
 
-def build_optimal_lineup(
+def optimize_single_lineup(
     slate_df: pd.DataFrame, 
-    template: LineupTemplate, 
+    template: 'LineupTemplate', 
     bucket_slack: int,
     locked_player_ids: List[str], 
     excluded_player_ids: List[str]
-) -> Union[pd.DataFrame, None]:
+) -> Union[List[str], None]:
     """
-    Finds the lineup that maximizes projection while prioritizing template adherence.
-    Soft constraints are used for ownership targets to ensure a lineup is always found.
+    Finds the lineup that maximizes projection (or sampled projection) while 
+    prioritizing template adherence. Returns a list of player_ids.
     """
     
     # Filter for playable players
@@ -128,7 +130,7 @@ def build_optimal_lineup(
     
     # 2. Objective Function Components
     
-    # A. Maximization: Total Projected Points
+    # A. Maximization: Total Projected Points (The 'proj' column here can be raw or sampled projection)
     total_projection = lpSum(playable_df.loc[playable_df['player_id'] == pid, 'proj'].iloc[0] * player_vars[pid] 
                              for pid in playable_df['player_id'])
     
@@ -152,7 +154,7 @@ def build_optimal_lineup(
         over_var = LpVariable(f"Over_{bucket}", lowBound=0)
         prob += count - over_var <= max_count, f"{bucket} Max Soft"
         
-        # Add penalty: Violating the target costs points (e.g., 500 points per violation)
+        # Add penalty: Violating the target costs points (500 points)
         penalty_sum += 500 * under_var + 500 * over_var
 
     # 3. Final Objective Function: Maximize Projection - Penalties
@@ -168,7 +170,7 @@ def build_optimal_lineup(
     # B. Roster Size Constraint
     prob += lpSum(player_vars[pid] for pid in playable_df['player_id']) == template.roster_size, "Roster Size"
 
-    # C. Min Games Constraint (Leaving this as a hard constraint for integrity)
+    # C. Min Games Constraint
     game_ids = playable_df['GameID'].unique()
     game_vars = LpVariable.dicts("Game", game_ids, 0, 1, LpBinary)
     
@@ -178,7 +180,7 @@ def build_optimal_lineup(
     
     prob += lpSum(game_vars[gid] for gid in game_ids) >= template.min_games, "Minimum Games"
 
-    # D. Positional Constraints (The Verified Logic)
+    # D. Positional Constraints
     pos_map = template.pos_req
     
     pg_players = playable_df[playable_df['positions'].str.contains('PG')]['player_id'].tolist()
@@ -187,14 +189,12 @@ def build_optimal_lineup(
     pf_players = playable_df[playable_df['positions'].str.contains('PF')]['player_id'].tolist()
     c_players = playable_df[playable_df['positions'].str.contains('C')]['player_id'].tolist()
 
-    # Hard Slot Requirements
     prob += lpSum(player_vars[pid] for pid in pg_players) >= pos_map['PG'], "PG Min"
     prob += lpSum(player_vars[pid] for pid in sg_players) >= pos_map['SG'], "SG Min"
     prob += lpSum(player_vars[pid] for pid in sf_players) >= pos_map['SF'], "SF Min"
     prob += lpSum(player_vars[pid] for pid in pf_players) >= pos_map['PF'], "PF Min"
     prob += lpSum(player_vars[pid] for pid in c_players) >= pos_map['C'], "C Min"
     
-    # Flexible Slots (G & F)
     prob += lpSum(player_vars[pid] for pid in set(pg_players) | set(sg_players)) >= (pos_map['PG'] + pos_map['SG'] + pos_map['G']), "G Slot Fulfillment"
     prob += lpSum(player_vars[pid] for pid in set(sf_players) | set(pf_players)) >= (pos_map['SF'] + pos_map['PF'] + pos_map['F']), "F Slot Fulfillment"
     
@@ -204,18 +204,131 @@ def build_optimal_lineup(
             prob += player_vars[pid] == 1, f"Lock Player {pid}"
         
     # 5. Solve the Problem
-    prob.solve()
-    
+    prob.solve(PULP_CBC_CMD(msg=0)) # Suppress output
+
     # 6. Process Results
     if prob.status == LpStatusOptimal:
         selected_players = [pid for pid in playable_df['player_id'] if player_vars[pid].varValue == 1]
         
-        final_penalty = value(penalty_sum)
-        
-        if final_penalty > 0.0:
-            print(f"⚠️ Optimal lineup found, but incurred a template penalty of {final_penalty / 500:.0f} violation(s) to maximize projection.")
-            
-        return slate_df[slate_df['player_id'].isin(selected_players)]
+        # Return only the list of player IDs (for efficient MCS collection)
+        return selected_players
     else:
-        print("❌ CRITICAL FAILURE: Could not find a valid lineup. Check hard constraints (Salary Cap, Roster Size, Positional Minimums, Min Games).")
         return None
+
+def run_monte_carlo_simulations(
+    slate_df: pd.DataFrame, 
+    template: 'LineupTemplate', 
+    num_iterations: int,
+    max_exposures: Dict[str, float],
+    bucket_slack: int,
+    locked_player_ids: List[str], 
+    excluded_player_ids: List[str],
+    min_lineup_diversity: int = 4
+) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    """
+    Runs Monte Carlo simulations, collects optimal lineups, and applies 
+    Max Exposure and Lineup Diversity constraints.
+    Returns: (list of final lineups (dicts), dict of player exposures)
+    """
+    
+    # 1. PRE-CALCULATE STATISTICAL VARIANCE
+    # Add a Standard Deviation column (Default: 20% of projection)
+    slate_df['std_dev'] = slate_df['proj'] * DEFAULT_STD_DEV_PCT
+    
+    raw_optimal_lineups = []
+    
+    # Ensure players with 0 salary/proj aren't throwing errors (safety check)
+    sim_df = slate_df.copy()
+    sim_df.loc[sim_df['std_dev'] == 0, 'std_dev'] = 0.1
+    sim_df.loc[sim_df['proj'] <= 0, 'proj'] = 0.1
+    
+    # 2. RUN SIMULATIONS
+    for i in range(num_iterations):
+        
+        # Sample new projections N(mu, sigma)
+        sim_df['sampled_proj'] = np.random.normal(
+            loc=sim_df['proj'], 
+            scale=sim_df['std_dev']
+        ).clip(lower=0.1)
+        
+        # Create a temporary DF with sampled proj as the primary 'proj' column
+        temp_df = sim_df.rename(columns={'sampled_proj': 'proj'})
+
+        lineup_ids = optimize_single_lineup(
+            slate_df=temp_df,
+            template=template,
+            bucket_slack=bucket_slack,
+            locked_player_ids=locked_player_ids,
+            excluded_player_ids=excluded_player_ids
+        )
+        
+        if lineup_ids:
+            # Append the lineup IDs and the total projected score for this sim
+            lineup_proj = temp_df[temp_df['player_id'].isin(lineup_ids)]['proj'].sum()
+            
+            raw_optimal_lineups.append({
+                'player_ids': lineup_ids,
+                'proj_score': lineup_proj
+            })
+
+    # --- 3. POST-SIMULATION ANALYSIS & FILTERING ---
+    
+    if not raw_optimal_lineups:
+        return [], {}
+
+    # Sort lineups by projection (highest projected lineups will be preferred)
+    raw_optimal_lineups.sort(key=lambda x: x['proj_score'], reverse=True)
+    
+    final_lineups = []
+    
+    # Tally counts for exposure tracking
+    player_counts = {pid: 0 for pid in slate_df['player_id']}
+    
+    # --- Filtered Output Set Size (Max 100 lineups for display) ---
+    max_output_lineups = min(len(raw_optimal_lineups), 100) 
+    
+    
+    for lineup in raw_optimal_lineups:
+        lineup_ids = lineup['player_ids']
+        
+        # A. Check Max Exposure Constraint
+        violates_exposure = False
+        for pid in lineup_ids:
+            max_pct = max_exposures.get(pid, 1.0) # Default Max Exposure is 100% (1.0)
+            
+            if (player_counts.get(pid, 0) + 1) / (len(final_lineups) + 1) > max_pct:
+                violates_exposure = True
+                break
+        
+        if violates_exposure:
+            continue
+
+        # B. Check Lineup Diversity Constraint (min_lineup_diversity = max shared players)
+        # Check against existing lineups in the final set
+        is_diverse = True
+        for existing_lineup in final_lineups:
+            shared_count = len(set(lineup_ids) & set(existing_lineup['player_ids']))
+            if shared_count > min_lineup_diversity:
+                is_diverse = False
+                break
+        
+        if is_diverse:
+            final_lineups.append(lineup)
+            
+            # Update player counts for exposure tracking
+            for pid in lineup_ids:
+                player_counts[pid] = player_counts.get(pid, 0) + 1
+            
+            if len(final_lineups) >= max_output_lineups:
+                break
+    
+    # Calculate final exposures based on the filtered set
+    total_lineups_count = len(final_lineups)
+    
+    final_exposures = {
+        pid: (count / total_lineups_count) * 100
+        for pid, count in player_counts.items() 
+        if count > 0
+    }
+    
+    return final_lineups, final_exposures
