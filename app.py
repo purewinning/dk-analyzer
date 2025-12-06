@@ -4,6 +4,9 @@ import streamlit as st
 from typing import Dict, Any, List, Tuple
 import io 
 
+# Import simulation engine
+from simulation_engine import TournamentSimulator, run_simulation_analysis
+
 # NOTE: The 'builder' module is assumed to be correct and unchanged.
 from builder import (
     build_template_from_params, 
@@ -497,6 +500,205 @@ def tab_lineup_builder(slate_df, template):
         st.info("Select the number of lineups and click 'Generate Top N Lineups' above to run the multi-lineup builder.")
 
 
+def tab_strategy_lab(slate_df, template):
+    """Render the Strategy Lab - Simulation and Pattern Analysis."""
+    st.header("🧪 Strategy Lab - Tournament Simulation")
+    
+    if slate_df.empty:
+        st.info("✏️ Paste your data into the sidebar text area to access the Strategy Lab.")
+        return
+    
+    st.markdown("""
+    This lab simulates thousands of tournaments to discover **which lineup construction patterns actually win**.
+    Compare chalk-heavy vs contrarian strategies using Monte Carlo simulation.
+    """)
+    
+    # Check if we have lineups to analyze
+    if not st.session_state['optimal_lineups_results'].get('ran', False):
+        st.warning("⚠️ Generate lineups first in the 'Lineup Builder' tab, then return here for simulation analysis.")
+        return
+    
+    lineups = st.session_state['optimal_lineups_results']['lineups']
+    
+    if not lineups:
+        st.info("No lineups available to simulate. Generate some lineups first!")
+        return
+    
+    # Simulation Controls
+    st.subheader("Simulation Parameters")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        field_size = st.selectbox(
+            "Tournament Field Size",
+            options=[1000, 5000, 10000, 50000, 150000],
+            index=2,
+            help="Number of entries in the tournament"
+        )
+    
+    with col2:
+        n_simulations = st.slider(
+            "Number of Simulations",
+            min_value=100,
+            max_value=5000,
+            value=1000,
+            step=100,
+            help="More simulations = more accurate results (but slower)"
+        )
+    
+    run_sim_btn = st.button("🎲 Run Tournament Simulation", use_container_width=True)
+    
+    if run_sim_btn or 'simulation_results' in st.session_state:
+        
+        if run_sim_btn:
+            with st.spinner(f'Running {n_simulations} tournament simulations...'):
+                simulator = TournamentSimulator(slate_df, field_size=field_size)
+                
+                # Analyze top 10 lineups
+                lineups_dict = {
+                    f"Lineup {i+1}": lineup['player_ids'] 
+                    for i, lineup in enumerate(lineups[:10])
+                }
+                
+                comparison_df = simulator.compare_strategies(lineups_dict, n_simulations=n_simulations)
+                st.session_state['simulation_results'] = comparison_df
+                st.session_state['simulator'] = simulator
+        
+        results_df = st.session_state.get('simulation_results')
+        
+        if results_df is not None and not results_df.empty:
+            
+            st.success("✅ Simulation Complete!")
+            
+            # Display Key Insights
+            st.subheader("📊 Simulation Results")
+            
+            # Metrics for best lineup
+            best_lineup = results_df.loc[results_df['Leverage Score'].idxmax()]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Best Leverage", 
+                    f"{best_lineup['Lineup']}", 
+                    f"{best_lineup['Leverage Score']:.1f}"
+                )
+            with col2:
+                st.metric(
+                    "Win Rate", 
+                    f"{best_lineup['Win Rate %']:.2f}%",
+                    delta=f"1 in {int(100/best_lineup['Win Rate %'])}"
+                )
+            with col3:
+                st.metric(
+                    "Strategy", 
+                    best_lineup['Strategy']
+                )
+            with col4:
+                st.metric(
+                    "Avg Ownership",
+                    f"{best_lineup['Avg Own %']:.1f}%"
+                )
+            
+            st.markdown("---")
+            
+            # Full Results Table
+            st.subheader("Full Lineup Comparison")
+            
+            # Format and display
+            display_df = results_df.copy()
+            
+            # Color code by strategy
+            def color_strategy(val):
+                if val == "Chalk Heavy":
+                    return 'background-color: #9C3838; color: white'
+                elif val == "Contrarian Punt":
+                    return 'background-color: #3D85C6; color: white'
+                elif val == "Full Contrarian":
+                    return 'background-color: #38761D; color: white'
+                else:
+                    return 'background-color: #A37F34; color: white'
+            
+            styled_df = display_df.style.applymap(
+                color_strategy, subset=['Strategy']
+            ).format({
+                'Win Rate %': '{:.3f}%',
+                'Top 10% Rate': '{:.2f}%',
+                'Avg Score': '{:.1f}',
+                'Ceiling (90th)': '{:.1f}',
+                'Floor (10th)': '{:.1f}',
+                'Avg Own %': '{:.1f}%',
+                'Leverage Score': '{:.1f}'
+            }).background_gradient(
+                subset=['Leverage Score'], 
+                cmap='RdYlGn'
+            )
+            
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            
+            st.markdown("---")
+            
+            # Strategy Pattern Analysis
+            st.subheader("📈 Ownership Construction Patterns")
+            
+            st.markdown("""
+            **How to read this:**
+            - **Mega Chalk** = Players with >40% ownership
+            - **Chalk** = Players with 30-40% ownership  
+            - **Mid** = Players with 10-30% ownership
+            - **Punt** = Players with <10% ownership
+            
+            **Leverage Score** = Win Rate × Uniqueness (higher = better tournament EV)
+            """)
+            
+            # Pattern breakdown
+            pattern_cols = ['Lineup', 'Strategy', 'Mega Chalk', 'Chalk', 'Mid', 'Punt', 'Leverage Score']
+            pattern_df = results_df[pattern_cols].copy()
+            
+            st.dataframe(
+                pattern_df.style.background_gradient(
+                    subset=['Leverage Score'], 
+                    cmap='Greens'
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Insights
+            st.markdown("---")
+            st.subheader("💡 Key Insights")
+            
+            # Calculate insights
+            best_strategy = results_df.loc[results_df['Leverage Score'].idxmax(), 'Strategy']
+            avg_leverage = results_df['Leverage Score'].mean()
+            
+            chalk_heavy = results_df[results_df['Strategy'] == 'Chalk Heavy']
+            contrarian = results_df[results_df['Strategy'].str.contains('Contrarian')]
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**🎯 Optimal Strategy Found:**")
+                st.write(f"- **{best_strategy}** has highest leverage")
+                st.write(f"- Average lineup leverage: {avg_leverage:.1f}")
+                
+                if len(chalk_heavy) > 0:
+                    st.write(f"- Chalk-heavy win rate: {chalk_heavy['Win Rate %'].mean():.3f}%")
+                if len(contrarian) > 0:
+                    st.write(f"- Contrarian win rate: {contrarian['Win Rate %'].mean():.3f}%")
+            
+            with col2:
+                st.markdown("**📊 Pattern Analysis:**")
+                avg_mega = results_df['Mega Chalk'].mean()
+                avg_punt = results_df['Punt'].mean()
+                
+                st.write(f"- Average mega chalk players: {avg_mega:.1f}")
+                st.write(f"- Average punt plays: {avg_punt:.1f}")
+                st.write(f"- Winning construction: {int(best_lineup['Mega Chalk'])} mega, {int(best_lineup['Chalk'])} chalk, {int(best_lineup['Mid'])} mid, {int(best_lineup['Punt'])} punt")
+
+
 def tab_contest_analyzer(slate_df, template):
     """Render the Contest Analyzer."""
     st.header("Contest Strategy Analyzer")
@@ -581,10 +783,13 @@ if __name__ == '__main__':
     )
     
     # Main tabs
-    tab1, tab2 = st.tabs(["🏗️ Lineup Builder", "📊 Contest Analyzer"])
+    tab1, tab2, tab3 = st.tabs(["🏗️ Lineup Builder", "🧪 Strategy Lab", "📊 Contest Analyzer"])
     
     with tab1:
         tab_lineup_builder(slate_df, template)
     
     with tab2:
+        tab_strategy_lab(slate_df, template)
+    
+    with tab3:
         tab_contest_analyzer(slate_df, template)
