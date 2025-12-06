@@ -1,10 +1,11 @@
 # app.py
+# (Lines 1-8 are the focus of your error)
 
 import pandas as pd 
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List, Tuple
-# Ensure this import block is perfectly copied
+# Line 8: The start of the import block
 from builder import (
     build_template_from_params, 
     run_monte_carlo_simulations, 
@@ -172,9 +173,9 @@ def tab_lineup_builder(slate_df, template):
     
     # The Interactive Data Editor
     edited_df = st.data_editor(
-        slate_df[column_order + ['player_id', 'GameID']], # Pass all required columns to the data editor
+        slate_df[column_order + ['player_id', 'GameID']], 
         column_config=column_config,
-        column_order=column_order, # Apply the defined order
+        column_order=column_order, 
         hide_index=True,
         use_container_width=True,
         height=400,
@@ -183,13 +184,11 @@ def tab_lineup_builder(slate_df, template):
     st.session_state['edited_df'] = edited_df
     
     # Extract Constraints
-    # CRITICAL FIX: Ensure player_id is string and filter for clean lists
     edited_df['player_id'] = edited_df['player_id'].astype(str)
     
     locked_players_raw = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
     excluded_players_raw = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
 
-    # Clean the lists: filter out any empty strings or non-string types
     locked_player_ids = [pid for pid in locked_players_raw if isinstance(pid, str) and pid.strip()]
     excluded_player_ids = [pid for pid in excluded_players_raw if isinstance(pid, str) and pid.strip()]
 
@@ -247,8 +246,8 @@ def tab_lineup_builder(slate_df, template):
                 num_iterations=iterations,
                 max_exposures=max_exposures,
                 bucket_slack=1,
-                locked_player_ids=locked_player_ids, # Pass the cleaned lists
-                excluded_player_ids=excluded_player_ids, # Pass the cleaned lists
+                locked_player_ids=locked_player_ids, 
+                excluded_player_ids=excluded_player_ids, 
                 min_lineup_diversity=diversity
             )
         
@@ -290,7 +289,6 @@ def tab_simulation_results(slate_df):
         
         exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']] 
         
-        # 🛑 FIX: Ensure the st.dataframe() call has the correct closing structure.
         st.dataframe(
             exposure_df_display.style.format({
                 "proj": "{:.1f}", 
