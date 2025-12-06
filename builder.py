@@ -1,230 +1,227 @@
 # builder.py
 
-from dataclasses import dataclass, field
-from typing import Tuple, List, Optional, Dict, Any
 import pandas as pd
-import pulp
+import numpy as np
+from pulp import *
+from typing import Dict, List, Tuple, Union
 
-# --- GLOBAL CONFIGURATION (UPDATED TO WHOLE NUMBERS) ---
-MEGA_CHALK_THR = 40.0    # >= 40% owned
-CHALK_THR      = 30.0    # 30–39%
-PUNT_THR       = 10.0    # < 10%
+# --- CONFIGURATION CONSTANTS ---
+# Ownership Thresholds (0-100 scale)
+PUNT_THR = 10.0
+CHALK_THR = 30.0
+MEGA_CHALK_THR = 40.0
 
 DEFAULT_SALARY_CAP = 50000
-DEFAULT_ROSTER_SIZE = 8  # Classic DK format (NBA)
+DEFAULT_ROSTER_SIZE = 8
 
-# --- NBA CLASSIC ROSTER SLOTS ---
-ROSTER_REQUIREMENTS = {
-    'PG': 1,
-    'SG': 1,
-    'SF': 1,
-    'PF': 1,
-    'C': 1,
-    'G': 1,  # Guard (PG or SG)
-    'F': 1,  # Forward (SF or PF)
+# --- 1. CONTEST TEMPLATES ---
+
+# Defines the positional requirements and ownership targets for different contest types.
+DK_NBA_TEMPLATES = {
+    # DraftKings NBA Roster Slots (8 total players)
+    # Roster slots must match the image provided by the user.
+    "ROSTER_SLOTS": {
+        "PG": 1, 
+        "SG": 1,
+        "SF": 1,
+        "PF": 1,
+        "C": 1,
+        "G": 1,  # Must be PG or SG
+        "F": 1,  # Must be SF or PF
+        "Util": 1 # Must be PG, SG, SF, PF, or C
+    },
+    
+    # Ownership Buckets: (Min Count, Max Count) for 8 players
+    "OWNERSHIP_TARGETS": {
+        # Cash/Single Entry (SE) - Prioritizes high projection/value, moderate ownership.
+        "CASH": {
+            "punt": (0, 3),        # 0-10% Ownership
+            "mid": (2, 6),         # 10-30% Ownership
+            "chalk": (2, 6),       # 30-40% Ownership
+            "mega": (0, 2)         # >40% Ownership
+        },
+        # Single Entry GPP (SE) - Balances chalk with leverage.
+        "SE": {
+            "punt": (1, 4),
+            "mid": (2, 5),
+            "chalk": (1, 4),
+            "mega": (0, 2)
+        },
+        # Large Field GPP - Maximizes leverage; requires more low-owned players.
+        "LARGE_GPP": {
+            "punt": (2, 5),
+            "mid": (1, 4),
+            "chalk": (0, 3),
+            "mega": (0, 1)
+        }
+    }
 }
 
-MIN_GAMES_REQUIRED = 2 
+# --- 2. TEMPLATE CLASS (Helper) ---
 
+class LineupTemplate:
+    """Class to hold and manage contest constraints."""
+    
+    def __init__(self, contest_type: str, roster_size: int, salary_cap: int, min_games: int):
+        self.contest_type = contest_type
+        self.contest_label = self._get_contest_label(contest_type)
+        self.roster_size = roster_size
+        self.salary_cap = salary_cap
+        self.min_games = min_games
+        self.pos_req = DK_NBA_TEMPLATES["ROSTER_SLOTS"]
+        self.own_targets = DK_NBA_TEMPLATES["OWNERSHIP_TARGETS"][contest_type]
 
-# ---------------- Ownership Buckets ---------------- #
-
-def ownership_bucket(own: float) -> str:
-    """Return ownership bucket name based on ownership projection (0-100 scale)."""
-    if own >= MEGA_CHALK_THR:
-        return "mega"
-    elif own >= CHALK_THR:
-        return "chalk"
-    elif own >= PUNT_THR:
-        return "mid"
-    else:
-        return "punt"
-        
-# ---------------- Contest Template ---------------- #
-
-@dataclass
-class StructureTemplate:
-    """Defines the target ownership structure and rules for a contest type."""
-    contest_label: str
-    roster_size: int
-    salary_cap: int
-    target_mega: float
-    target_chalk: float
-    target_mid: float
-    target_punt: float
-    roster_slots: Dict[str, int] = field(default_factory=lambda: ROSTER_REQUIREMENTS)
-    min_games: int = MIN_GAMES_REQUIRED
+    def _get_contest_label(self, code: str) -> str:
+        """Translates contest code to a friendly label."""
+        if code == 'CASH': return "Cash Game"
+        if code == 'SE': return "Single Entry GPP"
+        if code == 'LARGE_GPP': return "Large Field GPP"
+        return "Unknown Contest"
 
     def bucket_ranges(self, slack: int = 1) -> Dict[str, Tuple[int, int]]:
-        """Convert float targets → integer min/max with slack."""
-        def clip_pair(x: float):
-            base = round(x)
-            return max(0, base - slack), max(0, base + slack)
-
-        return {
-            "mega":  clip_pair(self.target_mega),
-            "chalk": clip_pair(self.target_chalk),
-            "mid":   clip_pair(self.target_mid),
-            "punt":  clip_pair(self.target_punt),
-        }
-
-# ---------------- Template Generator ---------------- #
+        """Returns ownership ranges adjusted by slack (e.g., for ownership constraints)."""
+        ranges = {}
+        for bucket, (min_val, max_val) in self.own_targets.items():
+            ranges[bucket] = (max(0, min_val - slack), max_val + slack)
+        return ranges
 
 def build_template_from_params(
-    contest_type: str,
-    field_size: int,
-    pct_to_first: float,
-    roster_size: int = DEFAULT_ROSTER_SIZE,
-    salary_cap: int = DEFAULT_SALARY_CAP,
-    roster_slots: Dict[str, int] = ROSTER_REQUIREMENTS,
-    min_games: int = MIN_GAMES_REQUIRED,
-) -> StructureTemplate:
-    """Heuristic mapping: contest traits → ideal ownership structure."""
-    ct = contest_type.upper()
-    top_heavy = pct_to_first >= 20
-    large_field = field_size >= 5000
-    
-    target_mega = 2.0
-    target_chalk = 2.5
-    target_mid = 2.5
-    target_punt = 1.0
-    label = f"{ct}_GENERIC"
-    
-    if ct == "CASH":
-        label = "CASH"
-        target_mega = 3.5
-        target_chalk = 3.0
-        target_mid = 1.0
-        target_punt = 0.5
-    elif ct == "SE": # Single Entry
-        if large_field and top_heavy:
-            label = "SE_BIG_TOPHEAVY"
-            target_mega = 1.5
-            target_chalk = 2.0
-            target_mid = 2.0
-            target_punt = 2.5
-        else:
-            label = "SE_BALANCED"
-            target_mega = 2.0
-            target_chalk = 2.5
-            target_mid = 2.0
-            target_punt = 1.5
-    elif ct == "LARGE_GPP":
-        label = "GPP_LARGE_FIELD"
-        target_mega = 1.0
-        target_chalk = 1.5
-        target_mid = 2.0
-        target_punt = 3.5
-
-    return StructureTemplate(
-        contest_label=label,
+    contest_type: str, 
+    field_size: int, 
+    pct_to_first: float, 
+    roster_size: int,
+    salary_cap: int,
+    min_games: int
+) -> LineupTemplate:
+    """Initializes and returns a LineupTemplate instance."""
+    return LineupTemplate(
+        contest_type=contest_type, 
         roster_size=roster_size,
         salary_cap=salary_cap,
-        target_mega=target_mega,
-        target_chalk=target_chalk,
-        target_mid=target_mid,
-        target_punt=target_punt,
-        roster_slots=roster_slots,
-        min_games=min_games,
+        min_games=min_games
     )
 
+# --- 3. CORE LOGIC ---
 
-# ---------------- Classic Lineup Optimizer (ENHANCED) ---------------- #
+def ownership_bucket(own_proj: float) -> str:
+    """Categorizes a player based on their ownership projection."""
+    if own_proj < PUNT_THR:
+        return 'punt'
+    elif own_proj < CHALK_THR:
+        return 'mid'
+    elif own_proj < MEGA_CHALK_THR:
+        return 'chalk'
+    else:
+        return 'mega'
 
 def build_optimal_lineup(
-    slate_df: pd.DataFrame,
-    template: StructureTemplate,
-    bucket_slack: int = 1,
-    locked_player_ids: Optional[List[str]] = None, # NEW: Force these players
-    excluded_player_ids: Optional[List[str]] = None, # NEW: Ban these players
-) -> Optional[pd.DataFrame]:
+    slate_df: pd.DataFrame, 
+    template: LineupTemplate, 
+    bucket_slack: int,
+    locked_player_ids: List[str], 
+    excluded_player_ids: List[str]
+) -> Union[pd.DataFrame, None]:
     """
-    Classic DK (e.g., NBA 8-man): Maximize projection under cap and constraints.
+    Finds the optimal lineup using PuLP based on constraints.
+    Returns the optimal lineup DataFrame or None if infeasible.
     """
-    df = slate_df.copy().reset_index(drop=True)
-
-    # Filter out excluded players immediately to reduce problem size
-    if excluded_player_ids:
-        df = df[~df["player_id"].isin(excluded_player_ids)].reset_index(drop=True)
-
-    if df.empty:
-        return None
-
-    player_ids = df['player_id'].tolist()
     
-    # 1. Initialize the Problem and Variables
-    prob = pulp.LpProblem("DFS_Lineup_Classic", pulp.LpMaximize)
-    x = pulp.LpVariable.dicts("x", player_ids, lowBound=0, upBound=1, cat="Binary")
+    # Filter for playable players
+    playable_df = slate_df[~slate_df['player_id'].isin(excluded_player_ids)].copy()
     
-    # Objective: maximize projection
-    prob += pulp.lpSum(df.loc[df['player_id'] == i, "proj"].iloc[0] * x[i] for i in player_ids), "Maximize_Total_Points"
+    # 1. Setup the Problem
+    prob = LpProblem("DFS Lineup Optimization", LpMaximize)
+    
+    # Decision Variables: 1 if player is chosen, 0 otherwise
+    player_vars = LpVariable.dicts("Player", playable_df['player_id'], 0, 1, LpBinary)
+    
+    # 2. Objective Function: Maximize total projected points
+    prob += lpSum(playable_df.loc[playable_df['player_id'] == pid, 'proj'].iloc[0] * player_vars[pid] 
+                  for pid in playable_df['player_id']), "Total Projection"
+    
+    # 3. Constraints
+    
+    # A. Salary Cap Constraint: Total salary must be <= salary cap
+    prob += lpSum(playable_df.loc[playable_df['player_id'] == pid, 'salary'].iloc[0] * player_vars[pid] 
+                  for pid in playable_df['player_id']) <= template.salary_cap, "Salary Cap"
+                  
+    # B. Roster Size Constraint: Total number of players must equal roster size
+    prob += lpSum(player_vars[pid] for pid in playable_df['player_id']) == template.roster_size, "Roster Size"
 
-    # 2. General Constraints
-    prob += pulp.lpSum(x[i] for i in player_ids) == template.roster_size, "Exactly_8_Players"
-    prob += pulp.lpSum(df.loc[df['player_id'] == i, "salary"].iloc[0] * x[i] for i in player_ids) <= template.salary_cap, "Salary_Cap"
+    # C. Min Games Constraint: Players must be from at least 2 different games
+    game_ids = playable_df['GameID'].unique()
+    game_vars = LpVariable.dicts("Game", game_ids, 0, 1, LpBinary)
+    
+    # Map players to their games
+    for gid in game_ids:
+        game_players = playable_df[playable_df['GameID'] == gid]['player_id'].tolist()
+        # If any player from a game is chosen, the game variable is set to 1
+        prob += lpSum(player_vars[pid] for pid in game_players) <= len(game_players) * game_vars[gid], f"Game Active {gid}"
+    
+    # Total active games must be at least the minimum required
+    prob += lpSum(game_vars[gid] for gid in game_ids) >= template.min_games, "Minimum Games"
 
-    # 3. Lock Constraints (Must include locked players)
-    if locked_player_ids:
-        for lock_id in locked_player_ids:
-            if lock_id in player_ids: # Only lock if player is actually in the pool
-                prob += x[lock_id] == 1, f"Lock_{lock_id}"
+    # D. Positional Constraints (The key fix!)
+    pos_map = template.pos_req
+    
+    # Mapping of player position to DraftKings slots
+    
+    # PG Slot (Must be PG)
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('PG')]['player_id']) >= pos_map['PG'], "PG Slot Min"
+    
+    # SG Slot (Must be SG)
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('SG')]['player_id']) >= pos_map['SG'], "SG Slot Min"
 
-    # 4. Ownership Bucket Ranges (Leverage Constraint)
-    bucket_ranges = template.bucket_ranges(slack=bucket_slack)
-    for bucket_name, (bmin, bmax) in bucket_ranges.items():
-        ids = df[df['bucket'] == bucket_name]['player_id'].tolist()
-        if ids:
-            prob += pulp.lpSum(x[i] for i in ids) >= bmin, f"Min_{bucket_name}"
-            prob += pulp.lpSum(x[i] for i in ids) <= bmax, f"Max_{bucket_name}"
+    # SF Slot (Must be SF)
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('SF')]['player_id']) >= pos_map['SF'], "SF Slot Min"
+    
+    # PF Slot (Must be PF)
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('PF')]['player_id']) >= pos_map['PF'], "PF Slot Min"
+    
+    # C Slot (Must be C)
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('C')]['player_id']) >= pos_map['C'], "C Slot Min"
 
-    # 5. Positional Constraints
-    def is_eligible(player_position_string, slot_position):
-        return slot_position in player_position_string.split('/')
+    # G Slot (Total PG + SG must be at least the sum of PG, SG, and G slots)
+    total_g_slots = pos_map['PG'] + pos_map['SG'] + pos_map['G']
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('PG|SG')]['player_id']) >= total_g_slots, "Total G Slots Min"
 
-    for pos, required in template.roster_slots.items():
-        if pos == 'G':
-            eligible_pos = ['PG', 'SG']
-        elif pos == 'F':
-            eligible_pos = ['SF', 'PF']
-        else:
-            eligible_pos = [pos]
-            
-        eligible_ids = df[
-            df['positions'].apply(lambda p: any(is_eligible(p, ep) for ep in eligible_pos))
-        ]['player_id'].tolist()
+    # F Slot (Total SF + PF must be at least the sum of SF, PF, and F slots)
+    total_f_slots = pos_map['SF'] + pos_map['PF'] + pos_map['F']
+    prob += lpSum(player_vars[pid] for pid in playable_df[playable_df['positions'].str.contains('SF|PF')]['player_id']) >= total_f_slots, "Total F Slots Min"
+
+    # Total Utility (Total players must be equal to the roster size)
+    # This is covered by the Roster Size constraint, but we add a total constraint for verification
+    prob += lpSum(player_vars[pid] for pid in playable_df['player_id']) == template.roster_size, "Total Players Check"
+    
+
+    # E. Lock/Exclude Constraints
+    for pid in locked_player_ids:
+        if pid in player_vars:
+            prob += player_vars[pid] == 1, f"Lock Player {pid}"
         
-        if eligible_ids:
-            prob += (
-                pulp.lpSum(x[i] for i in eligible_ids) >= required,
-                f"Min_{required}_Players_for_{pos}"
-            )
-
-    # 6. Game Diversity Constraint
-    if 'GameID' in df.columns and template.min_games > 1:
-        unique_game_ids = df['GameID'].unique().tolist()
-        game_selected_vars = pulp.LpVariable.dicts("GameSelected", unique_game_ids, 0, 1, pulp.LpBinary)
-
-        for game_id in unique_game_ids:
-            players_in_game = df[df['GameID'] == game_id]['player_id'].tolist()
-            prob += (
-                pulp.lpSum(x[i] for i in players_in_game) <= template.roster_size * game_selected_vars[game_id],
-                f"Link_Players_to_Game_{game_id}"
-            )
-
-        prob += (
-            pulp.lpSum(game_selected_vars[game_id] for game_id in unique_game_ids) >= template.min_games,
-            "Minimum_Game_Diversity"
-        )
-
-    # 7. Solve and Extract
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
-
-    if pulp.LpStatus[prob.status] != "Optimal":
+    # F. Ownership Constraints (Based on Contest Strategy)
+    own_ranges = template.bucket_ranges(slack=bucket_slack)
+    
+    for bucket, (min_count, max_count) in own_ranges.items():
+        bucket_players = playable_df[playable_df['bucket'] == bucket]['player_id'].tolist()
+        
+        if bucket_players:
+            # Min constraint
+            prob += lpSum(player_vars[pid] for pid in bucket_players) >= min_count, f"{bucket} Min Count"
+            # Max constraint
+            prob += lpSum(player_vars[pid] for pid in bucket_players) <= max_count, f"{bucket} Max Count"
+    
+    # 4. Solve the Problem
+    prob.solve()
+    
+    # 5. Process Results
+    if prob.status == LpStatusOptimal:
+        selected_players = [pid for pid in playable_df['player_id'] if player_vars[pid].varValue == 1]
+        return slate_df[slate_df['player_id'].isin(selected_players)]
+    else:
+        # Check for Infeasible status
+        if prob.status == LpStatusInfeasible:
+            print("Solver Status: Infeasible. Constraints cannot be met.")
+        else:
+            print(f"Solver Status: {LpStatus[prob.status]}.")
         return None
-
-    selected_ids = [i for i in player_ids if x[i].varValue == 1]
-    if not selected_ids:
-        return None
-
-    lineup = df[df['player_id'].isin(selected_ids)].copy()
-    return lineup.reset_index(drop=True)
