@@ -1,4 +1,4 @@
-# app.py - FINAL CLEANED CODE (Syntax Fix for st.column_config)
+# app.py - FINAL FIX: MAPPING TO MATCH "PROJECTED FP" AND "OWNERSHIP %"
 
 import pandas as pd 
 import numpy as np
@@ -17,13 +17,18 @@ from builder import (
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
 
-# --- HEADER MAPPING (Simplified to exact Title Case headers) ---
+# --- HEADER MAPPING (FIXED to match screenshot headers) ---
 REQUIRED_CSV_TO_INTERNAL_MAP = {
+    # Essential Headers from the screenshot
     'Player': 'Name',
     'Salary': 'salary', 
     'Position': 'positions',
     'Team': 'Team',
     'Opponent': 'Opponent',
+    'PROJECTED FP': 'proj',      # MAPPED from 'Projection'
+    'OWNERSHIP %': 'own_proj',   # MAPPED from 'Ownership'
+    
+    # Fallback for common one-word headers (in case they appear in your file)
     'Projection': 'proj',
     'Ownership': 'own_proj',
     
@@ -49,23 +54,30 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
         st.success("✅ Data loaded successfully. Checking headers...")
         
         # --- CRITICAL FIX: STRIP WHITESPACE FROM ALL HEADERS ---
+        # This will remove any leading/trailing spaces from column names
         df.columns = df.columns.str.strip()
         
         # --- VALIDATE AND MAP REQUIRED COLUMNS ---
         actual_map = {}
         
-        # Build the actual mapping based on what's in the CSV and what's required
+        # 1. Build the actual mapping based on what's in the CSV and what's required
         for csv_name, internal_name in REQUIRED_CSV_TO_INTERNAL_MAP.items():
             if csv_name in df.columns:
                 actual_map[csv_name] = internal_name
         
-        # Check for missing required columns
-        essential_csv_names = ['Player', 'Salary', 'Position', 'Team', 'Opponent', 'Projection', 'Ownership']
-        final_missing = [name for name in essential_csv_names if name not in actual_map]
+        # 2. Check for missing required internal columns (proj and own_proj are critical)
+        required_internal = ['Name', 'salary', 'positions', 'Team', 'Opponent', 'proj', 'own_proj']
+        
+        # Check if the internal names are present in the *values* of the map
+        mapped_internal_names = set(actual_map.values())
+        final_missing_internal = [name for name in required_internal if name not in mapped_internal_names]
 
-        if final_missing:
-            st.error(f"Missing essential headers: The following columns are missing or incorrectly named: {', '.join(final_missing)}.")
-            st.error("Please ensure your CSV headers exactly match: Player, Salary, Position, Team, Opponent, Projection, Ownership.")
+        if final_missing_internal:
+            # Map back to the CSV names for a useful error message
+            missing_csv_names = [k for k, v in REQUIRED_CSV_TO_INTERNAL_MAP.items() if v in final_missing_internal and k in ['Player', 'Salary', 'Position', 'Team', 'Opponent', 'PROJECTED FP', 'OWNERSHIP %']]
+            
+            st.error(f"Missing essential headers: The following columns are missing or incorrectly named: {', '.join(set(missing_csv_names))}.")
+            st.error("Please ensure your CSV headers exactly match: Player, Salary, Position, Team, Opponent, PROJECTED FP, OWNERSHIP %.")
             return pd.DataFrame()
 
         # Rename columns using the filtered, actual map
@@ -282,7 +294,7 @@ def tab_lineup_builder(slate_df, template):
         "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
         "salary": st.column_config.NumberColumn("Salary", format="$%d", width="small"), 
         "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f", width="small"), 
-        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), # FIXED SYNTAX ERROR HERE
+        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), 
         "own_proj": st.column_config.NumberColumn("Own %", format="%.1f%%", width="small"),
         "Minutes": st.column_config.NumberColumn("Min", format="%.1f", width="small"),
         "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
