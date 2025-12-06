@@ -1,4 +1,4 @@
-# app.py - FINAL FIX: ACCEPT PASTE DATA VIA TEXT AREA AND FIXED c_map DICT
+# app.py - FINAL FIX: CLOSED f-STRING
 
 import pandas as pd 
 import numpy as np
@@ -181,30 +181,4 @@ def display_multiple_lineups(slate_df, template, lineup_list):
     """Function to display the top N optimized lineups with improved UI."""
     
     if not lineup_list:
-        st.error("❌ No valid lineups could be found that meet all constraints.")
-        st.warning("Try loosening your constraints or reducing the number of lineups requested.")
-        return
-    
-    # --- METRICS SECTION (UI Improvement) ---
-    best_lineup_data = lineup_list[0]
-    best_proj = best_lineup_data['proj_score']
-    
-    best_lineup_players_df = slate_df[slate_df['player_id'].isin(best_lineup_data['player_ids'])]
-    best_salary = best_lineup_players_df['salary'].sum()
-    best_value = best_proj / (best_salary / 1000) if best_salary else 0
-    
-    st.subheader("🚀 Top Lineup Metrics (Lineup 1)")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(label="Total Projected Points", 
-                  value=f"{best_proj:.2f}", 
-                  delta="Optimal Lineup Score")
-    with col2:
-        st.metric(label="Salary Used", 
-                  value=f"${best_salary:,}", 
-                  delta=f"${template.salary_cap - best_salary:,} Remaining")
-    with col3:
-        st.metric(label="Projection Value (X)", 
-                  value=f"{best_
+        st
