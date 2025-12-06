@@ -20,7 +20,7 @@ REQUIRED_CSV_TO_INTERNAL_MAP = {
     'Salary': 'salary',
     'Position': 'positions',
     'Projection': 'proj',
-    'Ownership': 'own_proj', # <-- CHANGED from 'Ownership %' to 'Ownership'
+    'Ownership': 'own_proj',
 }
 
 
@@ -63,31 +63,49 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             # --- STEP 3: CLEANUP DATA TYPES ---
             df['player_id'] = df['Name'] 
             
-            # CRITICAL FIX: Convert ownership projection to numeric, handling errors
-            initial_len = len(df)
-            # This handles cases where the user's data might use commas as decimals instead of periods,
-            # or if the data is already a float/int but stored as an object type in the DataFrame.
+            # Ownership cleaning (Robust against commas as decimals)
+            initial_len_own = len(df)
             df['own_proj'] = pd.to_numeric(
-                df['own_proj'].astype(str).str.replace(',', '.'), # Safely replace commas with periods
+                df['own_proj'].astype(str).str.replace(',', '.'), 
                 errors='coerce' 
             )
-            
-            # Drop any rows where own_proj is now invalid (NaN)
             df.dropna(subset=['own_proj'], inplace=True)
-            dropped_len = initial_len - len(df)
+            dropped_len_own = initial_len_own - len(df)
             
-            if dropped_len > 0:
-                 st.warning(f"⚠️ Dropped {dropped_len} player(s) due to invalid 'Ownership' data.")
+            if dropped_len_own > 0:
+                 st.warning(f"⚠️ Dropped {dropped_len_own} player(s) due to invalid 'Ownership' data.")
 
-            # Ensure ownership is between 0 and 1
             if len(df) > 0 and df['own_proj'].max() > 10: 
                  df['own_proj'] = df['own_proj'] / 100
                  st.info("ℹ️ Divided 'own_proj' by 100 (assuming % format).")
                  
-            # Final type conversions
-            df['salary'] = df['salary'].astype(int)
-            df['proj'] = df['proj'].astype(float)
+            
+            # CRITICAL SALARY CLEANING AND TYPE CONVERSION (Fix for $ , and whitespace)
+            try:
+                initial_len_salary = len(df)
+                # 1. Convert to string and strip whitespace
+                df['salary'] = df['salary'].astype(str).str.strip() 
+                
+                # 2. Remove $ and ,
+                df['salary'] = df['salary'].str.replace('$', '', regex=False).str.replace(',', '', regex=False)
+                
+                # 3. Convert to integer (Use Int64 to allow NaN for failed conversions)
+                df['salary'] = pd.to_numeric(df['salary'], errors='coerce').astype('Int64') 
+                
+                # Drop rows that failed salary conversion
+                df.dropna(subset=['salary'], inplace=True)
+                dropped_len_salary = initial_len_salary - len(df)
+                
+                if dropped_len_salary > 0:
+                    st.warning(f"⚠️ Dropped {dropped_len_salary} player(s) due to unfixable salary data.")
 
+                # Final type conversions
+                df['salary'] = df['salary'].astype(int) 
+                df['proj'] = df['proj'].astype(float)
+            except Exception as e:
+                st.error(f"Failed final conversion (Salary/Projection): {e}")
+                return pd.DataFrame()
+            
             if len(df) == 0:
                  st.error("❌ Final player pool is empty after cleaning.")
                  return pd.DataFrame()
@@ -206,41 +224,4 @@ if __name__ == '__main__':
         )
         
         if contest_type == 'GPP (Single Entry)':
-            contest_code = 'SE'
-        elif contest_type == 'GPP (Large Field)':
-            contest_code = 'LARGE_GPP'
-        else: # CASH
-            contest_code = 'CASH'
-            
-        st.markdown("---")
-        
-        st.header("2. Player Data")
-        uploaded_file = st.file_uploader(
-            "Upload Player Projections (CSV)", 
-            type=['csv'],
-            help="Required headers: Player, Salary, Position, Projection, Ownership, Team, Opponent." # <-- Updated help text
-        )
-        
-    # 1. Load Data
-    slate_df = load_and_preprocess_data(uploaded_file)
-    if slate_df.empty:
-        st.stop()
-        
-    # 2. Define the Target Contest Structure 
-    template = build_template_from_params(
-        contest_type=contest_code, 
-        field_size=10000, 
-        pct_to_first=30.0,
-        roster_size=DEFAULT_ROSTER_SIZE,
-        salary_cap=DEFAULT_SALARY_CAP,
-        min_games=MIN_GAMES_REQUIRED
-    )
-
-    # 3. Create the Tabs
-    tab1, tab2 = st.tabs(["🚀 Lineup Builder", "🔍 Contest Analyzer"])
-
-    with tab1:
-        tab_lineup_builder(slate_df, template)
-
-    with tab2:
-        tab_contest_analyzer(slate_df, template)
+            contest_code = '
