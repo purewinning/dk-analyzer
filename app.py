@@ -7,8 +7,8 @@ from typing import Dict, Any, List, Tuple
 # Ensure this import block is perfectly copied
 from builder import (
     build_template_from_params, 
-    run_monte_carlo_simulations, # <-- NEW IMPORT
-    optimize_single_lineup, # <-- NEW IMPORT
+    run_monte_carlo_simulations, 
+    optimize_single_lineup, 
     ownership_bucket,
     PUNT_THR, CHALK_THR, MEGA_CHALK_THR,
     DEFAULT_SALARY_CAP, DEFAULT_ROSTER_SIZE
@@ -76,19 +76,11 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             
             df['own_proj'] = df['own_proj'].round(1)
 
-            # CRITICAL SALARY CLEANING AND TYPE CONVERSION (Fix for $ , and whitespace)
+            # CRITICAL SALARY CLEANING AND TYPE CONVERSION
             try:
                 initial_len_salary = len(df)
-                # 1. Convert to string and strip whitespace
-                df['salary'] = df['salary'].astype(str).str.strip() 
-                
-                # 2. Remove $ and ,
-                df['salary'] = df['salary'].str.replace('$', '', regex=False).str.replace(',', '', regex=False)
-                
-                # 3. Convert to integer (Use Int64 to allow NaN for failed conversions)
+                df['salary'] = df['salary'].astype(str).str.strip().str.replace('$', '', regex=False).str.replace(',', '', regex=False)
                 df['salary'] = pd.to_numeric(df['salary'], errors='coerce').astype('Int64') 
-                
-                # Drop rows that failed salary conversion
                 df.dropna(subset=['salary'], inplace=True)
                 dropped_len_salary = initial_len_salary - len(df)
                 
@@ -119,15 +111,20 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.0, 28.0, 31.0], 
             'own_proj': [45.0, 35.0, 15.0, 28.0, 5.0, 8.0, 40.0, 12.0, 20.0, 9.0, 33.0, 18.0, 4.0, 16.0], 
             'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
-            'Opponent': ['BOS', 'BOS', 'LAL', 'LAL', 'DEN', 'DEN', 'MIL', 'MIL', 'PHX', 'PHX', 'BOS', 'LAL', 'DEN', 'MIL'],
+            'Opponent': ['BOS', 'BOS', 'LAL', 'LAL', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'BOS', 'LAL', 'DEN', 'MIL'],
             'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
         }
         df = pd.DataFrame(data)
         st.warning("⚠️ Using placeholder data. Upload your CSV for real analysis.")
 
-    # Assign Buckets (Now using 0-100 scale logic)
+    # Assign Buckets 
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
     
+    # --- NEW: CALCULATE VALUE ---
+    # Value = Projected Points / (Salary / 1000)
+    # Check for zero salary to prevent division by zero
+    df['value'] = np.where(df['salary'] > 0, (df['proj'] / (df['salary'] / 1000)).round(2), 0.0)
+
     # Initialize UI Control Columns
     if 'Lock' not in df.columns: df['Lock'] = False
     if 'Exclude' not in df.columns: df['Exclude'] = False
@@ -135,9 +132,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     
     return df
 
-# --- 2. HELPER: RANDOMIZE PROJECTIONS (No longer needed, replaced by MCS) ---
-
-# --- 3. TAB FUNCTIONS ---
+# --- 2. TAB FUNCTIONS ---
 
 # Use session state to store simulation results
 if 'sim_results' not in st.session_state:
@@ -159,17 +154,27 @@ def tab_lineup_builder(slate_df, template):
         "positions": st.column_config.TextColumn("Pos", disabled=True), 
         "salary": st.column_config.NumberColumn("Salary", format="$%d"), 
         "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), 
+        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True), # NEW
         "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), 
         "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), 
         "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), 
-        "Max_Exposure": st.column_config.NumberColumn("Max Exposure (%)", min_value=0, max_value=100, default=100, format="%d%%", help="Max % of final lineups player can appear in."),
+        "Max_Exposure": st.column_config.NumberColumn("Max Exposure (%)", min_value=0, max_value=100, default=100, format="%d%%", help="Max % of final lineups player can appear in."), # MOVED
         "player_id": None, "GameID": None, "Team": None, "Opponent": None
     }
     
+    # Define the exact order of columns for the data editor
+    column_order = [
+        'Lock', 'Exclude', 'Name', 'positions', 'salary', 
+        'proj', 'value', 'own_proj', 
+        'Team', 'Opponent', 
+        'Max_Exposure' # MOVED TO END
+    ]
+    
     # The Interactive Data Editor
     edited_df = st.data_editor(
-        slate_df[['Lock', 'Exclude', 'Max_Exposure', 'Name', 'positions', 'salary', 'proj', 'own_proj', 'Team', 'Opponent', 'GameID', 'player_id']],
+        slate_df[column_order + ['player_id', 'GameID']], # Pass all required columns to the data editor
         column_config=column_config,
+        column_order=column_order, # Apply the defined order
         hide_index=True,
         use_container_width=True,
         height=400,
@@ -255,7 +260,7 @@ def tab_simulation_results(slate_df):
         st.subheader(f"Player Exposure ({len(final_lineups)} Lineups)")
 
         # --- A. EXPOSURE TABLE ---
-        exposure_df = edited_df[['Name', 'positions', 'proj', 'own_proj', 'Max_Exposure', 'player_id']].copy()
+        exposure_df = edited_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'player_id']].copy() # ADDED 'value'
         exposure_df['Exposure_Pct'] = exposure_df['player_id'].map(final_exposures).fillna(0).round(1)
         
         # Calculate Over-Exposed/Under-Exposed Status
@@ -267,11 +272,12 @@ def tab_simulation_results(slate_df):
         
         exposure_df.sort_values(by='Exposure_Pct', ascending=False, inplace=True)
         
-        exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']]
+        exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'value', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']] # ADDED 'value'
         
         st.dataframe(
             exposure_df_display.style.format({
                 "proj": "{:.1f}", 
+                "value": "{:.2f}", # New format for value
                 "own_proj": "{:.1f}%", 
                 "Max_Exposure": "{:.0f}%", 
                 "Exposure_Pct": "{:.1f}%"
@@ -310,7 +316,7 @@ def tab_simulation_results(slate_df):
         lineup_df.sort_values(by='roster_position', inplace=True)
         
         # 3. Define display columns
-        display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+        display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'value', 'own_proj', 'bucket'] # ADDED 'value'
         lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
         
         # 4. Rename the column for display
@@ -328,7 +334,7 @@ def tab_simulation_results(slate_df):
         
         # Display Lineup
         st.dataframe(
-            lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "own_proj": "{:.1f}%"}),
+            lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "value": "{:.2f}", "own_proj": "{:.1f}%"}), # ADDED 'value'
             use_container_width=True,
             hide_index=True 
         )
