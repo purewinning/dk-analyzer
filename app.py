@@ -383,9 +383,289 @@ def assign_lineup_positions(lineup_df):
     
     return result_df
 
-# ... [Continue with all the tab functions - I'll provide them in the next message to stay within limits]
+# --- TAB FUNCTIONS ---
 
-# --- MAIN ENTRY POINT ---
+def display_multiple_lineups(slate_df, template, lineup_list):
+    """Function to display the top N optimized lineups with improved UI."""
+    
+    if not lineup_list:
+        st.error("❌ No valid lineups could be found that meet all constraints.")
+        st.warning("Try loosening your constraints or reducing the number of lineups requested.")
+        return
+    
+    best_lineup_data = lineup_list[0]
+    best_proj = best_lineup_data['proj_score']
+    
+    best_lineup_players_df = slate_df[slate_df['player_id'].isin(best_lineup_data['player_ids'])]
+    best_salary = best_lineup_players_df['salary'].sum()
+    best_value = best_proj / (best_salary / 1000) if best_salary else 0
+    
+    st.subheader("🚀 Top Lineup Metrics (Lineup 1)")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(label="Total Projected Points", value=f"{best_proj:.2f}", delta="Optimal Lineup Score")
+    with col2:
+        st.metric(label="Salary Used", value=f"${best_salary:,}", delta=f"${template.salary_cap - best_salary:,} Remaining")
+    with col3:
+        st.metric(label="Projection Value (X)", value=f"{best_value:.2f}", delta="Points per $1,000")
+
+    st.markdown("---") 
+
+    st.subheader("📋 Top Lineups Summary")
+    
+    summary_data = []
+    
+    for i, lineup_data in enumerate(lineup_list):
+        lineup_players_df = slate_df[slate_df['player_id'].isin(lineup_data['player_ids'])]
+        summary_data.append({
+            'Lineup': i + 1,
+            'Total Proj': lineup_data['proj_score'],
+            'Salary Used': lineup_players_df['salary'].sum(),
+            'Games Used': lineup_players_df['GameID'].nunique()
+        })
+        
+    summary_df = pd.DataFrame(summary_data).set_index('Lineup')
+    
+    st.dataframe(summary_df.style.format({"Total Proj": "{:.2f}", "Salary Used": "${:,}"}), use_container_width=True)
+    
+    st.subheader("🔎 Lineup Detail View")
+    
+    lineup_options = [f"Lineup {i+1} (Proj: {lineup_list[i]['proj_score']:.2f})" for i in range(len(lineup_list))]
+    lineup_selection = st.selectbox("Select Lineup for Detail View", options=lineup_options)
+    
+    lineup_index = lineup_options.index(lineup_selection)
+    selected_lineup_data = lineup_list[lineup_index]
+    selected_lineup_ids = selected_lineup_data['player_ids']
+
+    lineup_df = slate_df[slate_df['player_id'].isin(selected_lineup_ids)].copy()
+    
+    lineup_df = assign_lineup_positions(lineup_df)
+    
+    if lineup_df is None:
+        st.error("❌ Could not assign valid roster positions.")
+        return
+    
+    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+    position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
+    lineup_df['roster_slot'] = lineup_df['roster_slot'].astype(position_type)
+    lineup_df.sort_values(by='roster_slot', inplace=True)
+    
+    display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
+    lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
+    
+    lineup_df_display.rename(columns={
+        'roster_slot': 'SLOT', 
+        'positions': 'POS', 
+        'own_proj': 'OWN%', 
+        'Minutes': 'MIN', 
+        'FPPM': 'FP/M', 
+        'bucket': 'CATEGORY'
+    }, inplace=True)
+    
+    styled_lineup_df = lineup_df_display.style.applymap(color_bucket, subset=['CATEGORY']).format({
+        "salary": "${:,}", 
+        "proj": "{:.1f}", 
+        "value": "{:.2f}", 
+        "OWN%": "{:.1f}%", 
+        "MIN": "{:.1f}", 
+        "FP/M": "{:.2f}"
+    })
+    
+    st.dataframe(styled_lineup_df, use_container_width=True, hide_index=True)
+
+
+def tab_lineup_builder(slate_df, template):
+    """Render the Interactive Lineup Builder and run the multi-lineup Optimizer."""
+    
+    tournament_type = st.session_state.get('tournament_type', 'Single Entry GPP')
+    tournament_config = st.session_state.get('tournament_config', {})
+    contest_code = st.session_state.get('contest_code', 'SE')
+    
+    st.markdown(f"## 🎯 {tournament_type}")
+    
+    col1, col2, col3 = st.columns([2, 2, 1])
+    
+    with col1:
+        st.markdown(f"**Strategy:** {tournament_config.get('description', 'N/A')}")
+        st.caption(f"Field Size: ~{tournament_config.get('field_size', 0):,} entries")
+    
+    with col2:
+        payout_pct = tournament_config.get('top_payout_pct', 0.01) * 100
+        st.markdown(f"**Payout Structure:** Top {payout_pct:.2f}% pays")
+        
+        if payout_pct >= 40:
+            st.caption("🟢 High cash rate - prioritize floor/consistency")
+        elif payout_pct >= 10:
+            st.caption("🟡 Medium cash rate - balance floor and ceiling")
+        else:
+            st.caption("🔴 Low cash rate - prioritize ceiling/leverage")
+    
+    with col3:
+        rec_lineups = tournament_config.get('recommended_lineups', 1)
+        if rec_lineups == 1:
+            st.metric("Entries", "1", delta="Single entry")
+        else:
+            st.metric("Max Entries", rec_lineups)
+    
+    if contest_code in TOURNAMENT_OWNERSHIP_TEMPLATES:
+        template_info = TOURNAMENT_OWNERSHIP_TEMPLATES[contest_code]
+        targets = template_info['ownership_targets']
+        
+        with st.expander("📋 Recommended Ownership Construction"):
+            st.markdown(f"**{template_info['name']}** - {template_info['description']}")
+            
+            construction_df = pd.DataFrame({
+                'Bucket': ['Punt (<10%)', 'Mid (10-30%)', 'Chalk (30-40%)', 'Mega (>40%)'],
+                'Target Range': [
+                    f"{targets['punt'][0]}-{targets['punt'][1]}",
+                    f"{targets['mid'][0]}-{targets['mid'][1]}",
+                    f"{targets['chalk'][0]}-{targets['chalk'][1]}",
+                    f"{targets['mega'][0]}-{targets['mega'][1]}"
+                ],
+                'Strategy': [
+                    '🔵 Low owned leverage plays',
+                    '🟢 Solid mid-tier value',
+                    '🟡 Popular but good plays',
+                    '🔴 Ultra-chalk stars'
+                ]
+            })
+            
+            st.table(construction_df)
+    
+    st.markdown("---")
+    
+    st.header(f"1. Player Pool & Constraints")
+    
+    st.markdown("Use the table to **🔒 Lock** or **❌ Exclude** players. The **Category** column shows ownership risk.")
+    
+    column_config = {
+        "Name": st.column_config.TextColumn("Player", disabled=True), 
+        "bucket": st.column_config.TextColumn("Category", disabled=True, help="punt (<10%), mid (10-30%), chalk (30-40%), mega (>40%)", width="small"),
+        "positions": st.column_config.TextColumn("Pos", disabled=True), 
+        "Team": st.column_config.TextColumn("Team", disabled=True, width="small"), 
+        "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
+        "salary": st.column_config.NumberColumn("Salary", format="$%d", width="small"), 
+        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f", width="small"), 
+        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), 
+        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f%%", width="small"),
+        "Minutes": st.column_config.NumberColumn("Min", format="%.1f", width="small"),
+        "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
+        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup", width="small"), 
+        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup", width="small"), 
+        "player_id": None, "GameID": None 
+    }
+    
+    column_order = [
+        'Lock', 'Exclude', 'Name', 'bucket', 'positions', 'Team', 'Opponent', 
+        'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM'
+    ]
+    
+    df_for_editor = slate_df.copy()
+    
+    if df_for_editor.empty:
+        st.info("✏️ Paste your player data into the text area in the sidebar and click the button to load the pool.")
+        
+        blank_df = pd.DataFrame(columns=column_order)
+        edited_df = st.data_editor(blank_df, column_config=column_config, column_order=column_order, hide_index=True, use_container_width=True, height=200, key="player_editor_blank")
+        st.session_state['edited_df'] = blank_df
+        st.markdown("---")
+        st.header("2. Find Optimal Lineups")
+        st.info("Optimization controls will be enabled once data is loaded.")
+        st.markdown("---")
+        st.header("3. Top 10 Lineups")
+        st.info("Lineup results will appear here.")
+        return 
+
+    df_for_editor = df_for_editor[column_order + ['player_id', 'GameID']]
+    
+    edited_df = st.data_editor(df_for_editor, column_config=column_config, column_order=column_order, hide_index=True, use_container_width=True, height=400, key="player_editor_final")
+    st.session_state['edited_df'] = edited_df
+    
+    edited_df['player_id'] = edited_df['player_id'].astype(str)
+    
+    locked_player_ids = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
+    excluded_player_ids = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
+
+    if locked_player_ids or excluded_player_ids:
+        st.caption(f"🔒 **Locked:** {len(locked_player_ids)} | ❌ **Excluded:** {len(excluded_player_ids)}")
+
+    st.markdown("---")
+    
+    st.header("2. Find Optimal Lineups")
+    
+    recommended_n = tournament_config.get('recommended_lineups', 10)
+    
+    st.info(f"""
+    **💡 Recommendation for {tournament_type}:**
+    - Generate **{recommended_n}** lineup(s) for this tournament type
+    - Field size: ~{tournament_config.get('field_size', 10000):,} entries  
+    - {tournament_config.get('description', '')}
+    """)
+    
+    col_n, col_slack = st.columns(2)
+    
+    with col_n:
+        default_n = min(recommended_n, 20)
+        n_lineups = st.slider("Number of Lineups to Generate (N)", min_value=1, max_value=150, value=default_n, step=1, help=f"Recommended: {recommended_n} for {tournament_type}")
+    
+    with col_slack:
+        if contest_code == "CASH":
+            default_slack = 0
+        elif contest_code == "LARGE_GPP":
+            default_slack = 2
+        else:
+            default_slack = 1
+            
+        slack = st.slider("Ownership Target Slack (Flexibility)", min_value=0, max_value=4, value=default_slack, step=1, help="Higher slack allows more deviation from ownership targets.")
+    
+    run_btn = st.button(f"✨ Generate Top {n_lineups} Lineups", use_container_width=True)
+    
+    if run_btn:
+        final_df = st.session_state['edited_df'].copy()
+        final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
+        
+        conflict = set(locked_player_ids) & set(excluded_player_ids)
+        if conflict:
+            st.error(f"❌ CONFLICT: Player(s) {', '.join(conflict)} are both locked and excluded.")
+            return
+
+        with st.spinner(f'Calculating top {n_lineups} optimal lineups...'):
+            top_lineups = generate_top_n_lineups(
+                slate_df=final_df,
+                template=template,
+                n_lineups=n_lineups,
+                bucket_slack=slack,
+                locked_player_ids=locked_player_ids, 
+                excluded_player_ids=excluded_player_ids, 
+            )
+        
+        st.session_state['optimal_lineups_results'] = {'lineups': top_lineups, 'ran': True}
+        st.success(f"✅ Optimization complete! Found {len(top_lineups)} unique lineups.")
+
+    st.markdown("---")
+    st.header(f"3. Top {n_lineups} Lineups")
+    
+    if st.session_state['optimal_lineups_results'].get('ran', False):
+        display_multiple_lineups(slate_df, template, st.session_state['optimal_lineups_results']['lineups'])
+    else:
+        st.info("Select the number of lineups and click 'Generate Top N Lineups' above to run the multi-lineup builder.")
+
+
+def tab_strategy_lab(slate_df, template):
+    st.header("🧪 Strategy Lab - Tournament Simulation")
+    st.info("Strategy Lab - Coming soon!")
+
+
+def tab_results_analysis(slate_df, template):
+    st.header("📈 Results Analysis - Actual Performance")
+    st.info("Results Analysis - Coming soon!")
+
+
+def tab_contest_analyzer(slate_df, template):
+    st.header("📊 Contest Strategy Analyzer")
+    st.info("Contest Analyzer - Coming soon!")
 if __name__ == '__main__':
     
     # Sidebar
@@ -490,5 +770,17 @@ if __name__ == '__main__':
         min_games=MIN_GAMES_REQUIRED
     )
     
-    # Placeholder for tabs - will add full tab functions in requirements
-    st.info("App structure loaded successfully. Tab functions loading...")
+    # Main tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["🏗️ Lineup Builder", "🧪 Strategy Lab", "📈 Results Analysis", "📊 Contest Analyzer"])
+    
+    with tab1:
+        tab_lineup_builder(slate_df, template)
+    
+    with tab2:
+        tab_strategy_lab(slate_df, template)
+    
+    with tab3:
+        tab_results_analysis(slate_df, template)
+    
+    with tab4:
+        tab_contest_analyzer(slate_df, template)
