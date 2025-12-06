@@ -192,6 +192,63 @@ def color_bucket(s):
     return color
 
 
+def assign_lineup_positions(lineup_df):
+    """
+    Assigns each player to a legal DraftKings roster slot based on their position eligibility.
+    Returns the dataframe with a 'roster_slot' column or None if no valid assignment exists.
+    """
+    # Define the slots we need to fill in order of specificity
+    slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+    
+    # Track which players are assigned
+    assigned_players = set()
+    slot_assignments = {}
+    
+    def can_play_slot(pos_string, slot):
+        """Check if a player with given positions can play a slot."""
+        positions = [p.strip() for p in pos_string.split('/')]
+        
+        if slot == 'PG':
+            return 'PG' in positions
+        elif slot == 'SG':
+            return 'SG' in positions
+        elif slot == 'SF':
+            return 'SF' in positions
+        elif slot == 'PF':
+            return 'PF' in positions
+        elif slot == 'C':
+            return 'C' in positions
+        elif slot == 'G':
+            return 'PG' in positions or 'SG' in positions
+        elif slot == 'F':
+            return 'SF' in positions or 'PF' in positions
+        elif slot == 'UTIL':
+            return True  # Anyone can play UTIL
+        return False
+    
+    # Try to fill slots in order
+    for slot in slots:
+        # Find available players who can fill this slot
+        available = lineup_df[~lineup_df['player_id'].isin(assigned_players)].copy()
+        
+        # Filter to those eligible for this slot
+        eligible = available[available['positions'].apply(lambda x: can_play_slot(x, slot))]
+        
+        if len(eligible) == 0:
+            return None  # Can't fill this slot
+        
+        # Assign the first eligible player (optimizer already chose optimal set)
+        chosen = eligible.iloc[0]
+        slot_assignments[slot] = chosen['player_id']
+        assigned_players.add(chosen['player_id'])
+    
+    # Create a new dataframe with slot assignments
+    result_df = lineup_df.copy()
+    result_df['roster_slot'] = result_df['player_id'].map({v: k for k, v in slot_assignments.items()})
+    
+    return result_df
+
+
 def display_multiple_lineups(slate_df, template, lineup_list):
     """Function to display the top N optimized lineups with improved UI."""
     
@@ -261,22 +318,26 @@ def display_multiple_lineups(slate_df, template, lineup_list):
     # Rebuild the dataframe for display
     lineup_df = slate_df[slate_df['player_id'].isin(selected_lineup_ids)].copy()
     
-    # Assign Roster Position for display
-    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-    lineup_df = lineup_df.head(8).assign(roster_position=ROSTER_ORDER) 
-
+    # IMPROVED: Assign positions based on actual eligibility
+    lineup_df = assign_lineup_positions(lineup_df)
+    
+    if lineup_df is None:
+        st.error("❌ Could not assign valid roster positions. This shouldn't happen if the optimizer is working correctly.")
+        return
+    
     # Sort by position order
+    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
     position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
-    lineup_df['roster_position'] = lineup_df['roster_position'].astype(position_type)
-    lineup_df.sort_values(by='roster_position', inplace=True)
+    lineup_df['roster_slot'] = lineup_df['roster_slot'].astype(position_type)
+    lineup_df.sort_values(by='roster_slot', inplace=True)
     
     # Define display columns
-    display_cols = ['roster_position', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
+    display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
     lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
     
     # Rename columns for display
     lineup_df_display.rename(columns={
-        'roster_position': 'SLOT', 
+        'roster_slot': 'SLOT', 
         'positions': 'POS', 
         'own_proj': 'OWN%', 
         'Minutes': 'MIN', 
