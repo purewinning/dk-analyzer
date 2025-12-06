@@ -200,7 +200,6 @@ def display_multiple_lineups(slate_df, template, lineup_list):
                   value=f"${best_salary:,}", 
                   delta=f"${template.salary_cap - best_salary:,} Remaining")
     with col3:
-        # --- INDENTATION FIX IS HERE ---
         st.metric(label="Projection Value (X)", 
                   value=f"{best_value:.2f}", 
                   delta="Points per $1,000")
@@ -455,41 +454,4 @@ if __name__ == '__main__':
         st.subheader("Paste Player Pool Data (CSV Format)")
         
         pasted_csv_data = st.text_area(
-            "Copy your player pool data (including headers) and paste it here.", 
-            height=200,
-            key="csv_paste_area",
-            help="The data should be a table copied directly from a spreadsheet or text file."
-        )
-        
-        load_button = st.button("Load Pasted Data", use_container_width=True)
-
-    # Load Data: Use session state to store the processed DataFrame across runs
-    if 'slate_df' not in st.session_state:
-        st.session_state['slate_df'] = pd.DataFrame()
-        
-    if load_button and pasted_csv_data.strip():
-        # Load the data and store the processed DataFrame in session state
-        st.session_state['slate_df'] = load_and_preprocess_data(pasted_csv_data)
-        # Clear the pasted text area to prevent accidental reload/rerun issues
-        st.session_state["csv_paste_area"] = "" 
-        
-    # Use the DataFrame from session state for the rest of the app
-    slate_df = st.session_state['slate_df'] 
-        
-    # Build Template
-    template = build_template_from_params(
-        contest_type=contest_code, 
-        field_size=10000, 
-        pct_to_first=30.0,
-        roster_size=DEFAULT_ROSTER_SIZE,
-        salary_cap=DEFAULT_SALARY_CAP,
-        min_games=MIN_GAMES_REQUIRED
-    )
-
-    # Tabs
-    t1, t2 = st.tabs(["✨ Optimal Lineup Builder", "📝 Contest Analyzer"])
-    
-    with t1:
-        tab_lineup_builder(slate_df, template)
-    with t2:
-        tab_contest_analyzer(slate_df, template)
+            "Copy your player pool data (including headers) and paste it
