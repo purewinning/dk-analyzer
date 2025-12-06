@@ -266,6 +266,70 @@ REQUIRED_CSV_TO_INTERNAL_MAP = {
 }
 CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name', 'Team', 'Opponent']
 
+# --- TOURNAMENT TEMPLATES ---
+TOURNAMENT_OWNERSHIP_TEMPLATES = {
+    "SE": {
+        "name": "Single Entry GPP",
+        "description": "High leverage, differentiated builds",
+        "ownership_targets": {
+            "punt": (1, 4),
+            "mid": (2, 5),
+            "chalk": (1, 4),
+            "mega": (0, 2)
+        }
+    },
+    "3MAX": {
+        "name": "3-Max GPP",
+        "description": "Balanced with variety across 3 entries",
+        "ownership_targets": {
+            "punt": (1, 4),
+            "mid": (2, 5),
+            "chalk": (2, 5),
+            "mega": (0, 2)
+        }
+    },
+    "20MAX": {
+        "name": "20-Max GPP",
+        "description": "Diverse builds with exposure control",
+        "ownership_targets": {
+            "punt": (0, 5),
+            "mid": (1, 6),
+            "chalk": (1, 5),
+            "mega": (0, 3)
+        }
+    },
+    "LARGE_GPP": {
+        "name": "Large Field GPP (150-Max)",
+        "description": "Maximum leverage, contrarian heavy",
+        "ownership_targets": {
+            "punt": (2, 5),
+            "mid": (1, 4),
+            "chalk": (0, 3),
+            "mega": (0, 1)
+        }
+    },
+    "CASH": {
+        "name": "Cash Game",
+        "description": "Safe, high floor, chalk plays",
+        "ownership_targets": {
+            "punt": (0, 3),
+            "mid": (2, 6),
+            "chalk": (2, 6),
+            "mega": (0, 2)
+        }
+    },
+    "SHOWDOWN": {
+        "name": "Showdown Captain Mode",
+        "description": "Single game, correlation focused",
+        "ownership_targets": {
+            "punt": (1, 3),
+            "mid": (2, 4),
+            "chalk": (1, 3),
+            "mega": (0, 2)
+        }
+    }
+}
+
 # --- 1. DATA PREPARATION ---
 
 def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
@@ -586,7 +650,67 @@ def display_multiple_lineups(slate_df, template, lineup_list):
 
 def tab_lineup_builder(slate_df, template):
     """Render the Interactive Lineup Builder and run the multi-lineup Optimizer."""
-    st.header(f"1. Player Pool & Constraints for **{template.contest_label}**")
+    
+    # Tournament Strategy Guide at the top
+    if 'tournament_type' in st.session_state and 'tournament_config' in st.session_state:
+        tournament_type = st.session_state['tournament_type']
+        tournament_config = st.session_state['tournament_config']
+        
+        # Create visual tournament guide
+        st.markdown(f"## 🎯 {tournament_type}")
+        
+        col1, col2, col3 = st.columns([2, 2, 1])
+        
+        with col1:
+            st.markdown(f"**Strategy:** {tournament_config['description']}")
+            st.caption(f"Field Size: ~{tournament_config['field_size']:,} entries")
+        
+        with col2:
+            payout_pct = tournament_config['top_payout_pct'] * 100
+            st.markdown(f"**Payout Structure:** Top {payout_pct:.2f}% pays")
+            
+            if payout_pct >= 40:
+                st.caption("🟢 High cash rate - prioritize floor/consistency")
+            elif payout_pct >= 10:
+                st.caption("🟡 Medium cash rate - balance floor and ceiling")
+            else:
+                st.caption("🔴 Low cash rate - prioritize ceiling/leverage")
+        
+        with col3:
+            if tournament_config['recommended_lineups'] == 1:
+                st.metric("Entries", "1", delta="Single entry")
+            else:
+                st.metric("Max Entries", tournament_config['recommended_lineups'])
+        
+        # Show recommended construction based on tournament type
+        if tournament_type in TOURNAMENT_OWNERSHIP_TEMPLATES:
+            template_info = TOURNAMENT_OWNERSHIP_TEMPLATES[st.session_state.get('contest_code', 'SE')]
+            targets = template_info['ownership_targets']
+            
+            with st.expander("📋 Recommended Ownership Construction"):
+                st.markdown(f"**{template_info['name']}** - {template_info['description']}")
+                
+                construction_df = pd.DataFrame({
+                    'Bucket': ['Punt (<10%)', 'Mid (10-30%)', 'Chalk (30-40%)', 'Mega (>40%)'],
+                    'Target Range': [
+                        f"{targets['punt'][0]}-{targets['punt'][1]}",
+                        f"{targets['mid'][0]}-{targets['mid'][1]}",
+                        f"{targets['chalk'][0]}-{targets['chalk'][1]}",
+                        f"{targets['mega'][0]}-{targets['mega'][1]}"
+                    ],
+                    'Strategy': [
+                        '🔵 Low owned leverage plays',
+                        '🟢 Solid mid-tier value',
+                        '🟡 Popular but good plays',
+                        '🔴 Ultra-chalk stars'
+                    ]
+                })
+                
+                st.table(construction_df)
+        
+        st.markdown("---")
+    
+    st.header(f"1. Player Pool & Constraints")
     
     # --- A. PLAYER POOL EDITOR ---
     st.markdown("Use the table to **🔒 Lock** or **❌ Exclude** players. The **Category** column shows ownership risk.")
@@ -664,17 +788,76 @@ def tab_lineup_builder(slate_df, template):
     # --- B. OPTIMIZATION CONTROLS ---
     st.header("2. Find Optimal Lineups")
     
+    # Show tournament-specific recommendations
+    if 'tournament_config' in st.session_state:
+        tournament_config = st.session_state['tournament_config']
+        
+        st.info(f"""
+        **Tournament Type:** {st.session_state.get('tournament_type', 'Unknown')}
+        
+        **Recommended Strategy:**
+        - Generate **{tournament_config['recommended_lineups']}** lineup(s)
+        - Field size: ~{tournament_config['field_size']:,} entries
+        - {tournament_config['description']}
+        """)
+    
     col_n, col_slack = st.columns(2)
     
     with col_n:
         n_lineups = st.slider("Number of Lineups to Generate (N)", 
-                              min_value=1, max_value=20, value=10, step=1,
+                              min_value=1, max_value=150, value=10, step=1,
                               help="The optimizer will find the N highest projected, unique lineups that meet all constraints.")
     
     with col_slack:
         slack = st.slider("Ownership Target Slack (Flexibility)", 
                           min_value=0, max_value=4, value=1, step=1,
                           help="Higher slack allows the optimizer to deviate more from the template's target player counts for each ownership bucket to find a higher projected score.")
+    
+    # Multi-entry exposure controls
+    if n_lineups > 1:
+        st.markdown("---")
+        st.subheader("📊 Multi-Entry Exposure Controls")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            use_exposure = st.checkbox(
+                "Enable Exposure Limits",
+                value=(n_lineups >= 10),
+                help="Prevent overusing the same players across multiple lineups"
+            )
+        
+        with col2:
+            if use_exposure:
+                max_exposure = st.slider(
+                    "Max Player Exposure %",
+                    min_value=10,
+                    max_value=100,
+                    value=min(70, max(40, 100 // (n_lineups // 3 + 1))),
+                    step=5,
+                    help=f"Don't use any player in more than this % of your {n_lineups} lineups"
+                )
+                
+                # Calculate max times a player can appear
+                max_exposures_count = int((max_exposure / 100) * n_lineups)
+                st.caption(f"= Max {max_exposures_count} times per player across {n_lineups} lineups")
+        
+        # Stacking strategy for multi-entry
+        st.markdown("**Lineup Diversity Strategy:**")
+        
+        diversity_strategy = st.radio(
+            "How should lineups differ?",
+            options=[
+                "Maximum Diversity (Every lineup very different)",
+                "Moderate Diversity (Some overlap allowed)", 
+                "Core + Satellite (1-2 core players in all lineups)"
+            ],
+            index=1,
+            help="Balance between correlation and diversity"
+        )
+        
+        if diversity_strategy == "Core + Satellite":
+            st.info("💡 **Tip:** Lock your core player(s) in the table above, then generate lineups")
     
     
     run_btn = st.button(f"✨ Generate Top {n_lineups} Lineups", use_container_width=True)
@@ -1451,10 +1634,132 @@ if __name__ == '__main__':
         st.title("🏀 DK Lineup Optimizer")
         st.caption("Maximize Projection based on Template")
         
-        contest_type = st.selectbox("Contest Strategy", ['GPP (Single Entry)', 'GPP (Large Field)', 'CASH'])
+        st.subheader("🎯 Tournament Selection")
         
-        c_map = {'GPP (Single Entry)': 'SE', 'GPP (Large Field)': 'LARGE_GPP', 'CASH': 'CASH'}
-        contest_code = c_map[contest_type]
+        # Tournament type selection
+        tournament_type = st.selectbox(
+            "Select Tournament Type",
+            options=[
+                "Single Entry GPP",
+                "3-Max GPP", 
+                "20-Max GPP",
+                "150-Max GPP (Large Field)",
+                "Cash Game (50/50, Double Up)",
+                "Showdown Captain Mode",
+                "Custom"
+            ],
+            help="Different tournaments require different strategies"
+        )
+        
+        # Map tournament types to strategy codes
+        tournament_map = {
+            "Single Entry GPP": {
+                "code": "SE",
+                "description": "High leverage, unique builds. Go contrarian to win big.",
+                "field_size": 10000,
+                "top_payout_pct": 0.001,
+                "recommended_lineups": 1
+            },
+            "3-Max GPP": {
+                "code": "3MAX",
+                "description": "Balanced variety. Mix chalk with contrarian.",
+                "field_size": 15000,
+                "top_payout_pct": 0.001,
+                "recommended_lineups": 3
+            },
+            "20-Max GPP": {
+                "code": "20MAX",
+                "description": "High diversity required. Multiple construction styles.",
+                "field_size": 50000,
+                "top_payout_pct": 0.0005,
+                "recommended_lineups": 20
+            },
+            "150-Max GPP (Large Field)": {
+                "code": "LARGE_GPP",
+                "description": "Maximum leverage and diversity needed.",
+                "field_size": 150000,
+                "top_payout_pct": 0.0001,
+                "recommended_lineups": 150
+            },
+            "Cash Game (50/50, Double Up)": {
+                "code": "CASH",
+                "description": "Safety first. High floor, chalk plays, consistency.",
+                "field_size": 1000,
+                "top_payout_pct": 0.50,
+                "recommended_lineups": 1
+            },
+            "Showdown Captain Mode": {
+                "code": "SHOWDOWN",
+                "description": "Single game. Correlations matter most.",
+                "field_size": 5000,
+                "top_payout_pct": 0.001,
+                "recommended_lineups": 20
+            },
+            "Custom": {
+                "code": "SE",
+                "description": "Custom settings",
+                "field_size": 10000,
+                "top_payout_pct": 0.01,
+                "recommended_lineups": 10
+            }
+        }
+        
+        tournament_config = tournament_map[tournament_type]
+        
+        # Show tournament info
+        st.info(f"**Strategy:** {tournament_config['description']}")
+        st.caption(f"Avg Field Size: ~{tournament_config['field_size']:,}")
+        st.caption(f"Top {tournament_config['top_payout_pct']*100}% pays out")
+        
+        # Advanced settings expander
+        with st.expander("⚙️ Advanced Tournament Settings"):
+            if tournament_type == "Custom":
+                custom_field_size = st.number_input(
+                    "Field Size",
+                    min_value=100,
+                    max_value=500000,
+                    value=10000,
+                    step=1000
+                )
+                tournament_config['field_size'] = custom_field_size
+                
+                custom_payout_pct = st.slider(
+                    "Top % That Pays",
+                    min_value=0.01,
+                    max_value=50.0,
+                    value=1.0,
+                    step=0.01,
+                    format="%.2f%%"
+                ) / 100
+                tournament_config['top_payout_pct'] = custom_payout_pct
+            
+            # Ownership strategy override
+            ownership_strategy = st.select_slider(
+                "Ownership Strategy",
+                options=["Full Chalk", "Balanced", "Contrarian", "Max Leverage"],
+                value="Balanced",
+                help="Override the default strategy for this tournament type"
+            )
+            
+            # Salary floor
+            min_salary = st.slider(
+                "Minimum Salary to Use",
+                min_value=40000,
+                max_value=50000,
+                value=48000,
+                step=500,
+                help="Don't leave too much salary on the table"
+            )
+        
+        # Map ownership strategy to contest code
+        if ownership_strategy == "Full Chalk":
+            contest_code = "CASH"
+        elif ownership_strategy == "Contrarian":
+            contest_code = "LARGE_GPP"
+        elif ownership_strategy == "Max Leverage":
+            contest_code = "LARGE_GPP"
+        else:
+            contest_code = tournament_config['code']
         
         st.divider()
         st.subheader("Paste Player Pool Data (CSV Format)")
@@ -1479,6 +1784,15 @@ if __name__ == '__main__':
                         st.error("❌ Failed to load data. Check the format and try again.")
             else:
                 st.warning("⚠️ Please paste some data first!")
+    
+    # Store tournament config in session state
+    if 'tournament_type' not in st.session_state:
+        st.session_state['tournament_type'] = tournament_type
+        st.session_state['tournament_config'] = tournament_config
+    else:
+        if st.session_state['tournament_type'] != tournament_type:
+            st.session_state['tournament_type'] = tournament_type
+            st.session_state['tournament_config'] = tournament_config
     
     # Initialize slate_df from session state
     if 'slate_df' not in st.session_state:
