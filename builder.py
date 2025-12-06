@@ -12,100 +12,119 @@ MEGA_CHALK_THR = 40.0
 
 DEFAULT_SALARY_CAP = 50000
 DEFAULT_ROSTER_SIZE = 8
-DEFAULT_STD_DEV_PCT = 0.20 # 20% of projection for standard deviation in MCS
+DEFAULT_STD_DEV_PCT = 0.20  # 20% of projection for standard deviation in MCS
 
-# --- 1. CONTEST TEMPLATES ---
 
-DK_NBA_TEMPLATES = {
-    "ROSTER_SLOTS": {
-        "PG": 1, 
-        "SG": 1,
-        "SF": 1,
-        "PF": 1,
-        "C": 1,
-        "G": 1,  
-        "F": 1, 
-        "Util": 1
-    },
-    
-    "OWNERSHIP_TARGETS": {
-        "CASH": {
-            "punt": (0, 3),
-            "mid": (2, 6),
-            "chalk": (2, 6),
-            "mega": (0, 2)
-        },
-        "SE": {
-            "punt": (1, 4),
-            "mid": (2, 5),
-            "chalk": (1, 4),
-            "mega": (0, 2)
-        },
-        "LARGE_GPP": {
-            "punt": (2, 5),
-            "mid": (1, 4),
-            "chalk": (0, 3),
-            "mega": (0, 1)
-        }
+# --- HELPER FUNCTIONS FOR TIER / OWNERSHIP BUCKETS ---
+
+def classify_ownership_bucket(ownership: float) -> str:
+    """
+    Classifies ownership into buckets: 'punt', 'chalk', 'mega', or 'mid'.
+    """
+    if ownership <= PUNT_THR:
+        return "punt"
+    elif ownership >= MEGA_CHALK_THR:
+        return "mega"
+    elif ownership >= CHALK_THR:
+        return "chalk"
+    else:
+        return "mid"
+
+
+def get_bucket_order(template_tier: str) -> List[str]:
+    """
+    Returns the preference order of ownership buckets based on a template tier.
+    """
+    tier_to_bucket_order = {
+        "punt": ["punt", "mid", "chalk", "mega"],
+        "mid": ["mid", "chalk", "punt", "mega"],
+        "chalk": ["chalk", "mid", "mega", "punt"],
+        "mega": ["mega", "chalk", "mid", "punt"],
     }
-}
+    return tier_to_bucket_order.get(template_tier, ["mid", "chalk", "punt", "mega"])
 
-# --- 2. TEMPLATE CLASS (Helper) ---
+
+# --- TEMPLATE CLASS FOR LINEUP STRUCTURE ---
 
 class LineupTemplate:
-    """Class to hold and manage contest constraints."""
-    
-    def __init__(self, contest_type: str, roster_size: int, salary_cap: int, min_games: int):
-        self.contest_type = contest_type
-        self.contest_label = self._get_contest_label(contest_type)
-        self.roster_size = roster_size
+    """
+    Represents the ownership bucket template for a lineup.
+    Example: 2 mega chalk, 3 chalk, 2 mid, 1 punt, etc.
+    """
+
+    def __init__(
+        self,
+        num_punt: int,
+        num_mid: int,
+        num_chalk: int,
+        num_mega: int,
+        salary_cap: int = DEFAULT_SALARY_CAP,
+        roster_size: int = DEFAULT_ROSTER_SIZE,
+    ):
+        self.num_punt = num_punt
+        self.num_mid = num_mid
+        self.num_chalk = num_chalk
+        self.num_mega = num_mega
         self.salary_cap = salary_cap
-        self.min_games = min_games
-        self.pos_req = DK_NBA_TEMPLATES["ROSTER_SLOTS"]
-        self.own_targets = DK_NBA_TEMPLATES["OWNERSHIP_TARGETS"][contest_type]
+        self.roster_size = roster_size
 
-    def _get_contest_label(self, code: str) -> str:
-        """Translates contest code to a friendly label."""
-        if code == 'CASH': return "Cash Game"
-        if code == 'SE': return "Single Entry GPP"
-        if code == 'LARGE_GPP': return "Large Field GPP"
-        return "Unknown Contest"
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            "punt": self.num_punt,
+            "mid": self.num_mid,
+            "chalk": self.num_chalk,
+            "mega": self.num_mega,
+        }
 
-    def bucket_ranges(self, slack: int = 1) -> Dict[str, Tuple[int, int]]:
-        """Returns ownership ranges adjusted by slack (e.g., for ownership constraints)."""
-        ranges = {}
-        for bucket, (min_val, max_val) in self.own_targets.items():
-            ranges[bucket] = (max(0, min_val - slack), max_val + slack)
-        return ranges
+    def __repr__(self) -> str:
+        return (
+            f"LineupTemplate(punt={self.num_punt}, mid={self.num_mid}, "
+            f"chalk={self.num_chalk}, mega={self.num_mega}, "
+            f"salary_cap={self.salary_cap}, roster_size={self.roster_size})"
+        )
 
-def build_template_from_params(
-    contest_type: str, 
-    field_size: int, 
-    pct_to_first: float, 
-    roster_size: int,
-    salary_cap: int,
-    min_games: int
-) -> 'LineupTemplate':
-    """Initializes and returns a LineupTemplate instance."""
-    return LineupTemplate(
-        contest_type=contest_type, 
-        roster_size=roster_size,
-        salary_cap=salary_cap,
-        min_games=min_games
-    )
 
-# --- 3. CORE LOGIC ---
+# --- EXPOSURE / OWNERSHIP HELPERS ---
 
-def ownership_bucket(own_proj: float) -> str:
-    """Categorizes a player based on their ownership projection."""
-    if own_proj < PUNT_THR:
-        return 'punt'
-    elif own_proj < CHALK_THR:
-        return 'mid'
-    elif own_proj < MEGA_CHALK_THR:
-        return 'chalk'
-    else:
-        return 'mega'
+def calculate_exposure_limits(
+    slate_df: pd.DataFrame,
+    max_chalk_pct: float,
+    max_mega_pct: float,
+) -> Dict[str, float]:
+    """
+    Build max exposure dictionary keyed by player_id.
+    """
+    exposure_limits: Dict[str, float] = {}
+
+    for _, row in slate_df.iterrows():
+        pid = row["player_id"]
+        own = float(row.get("own", 0.0))
+        bucket = classify_ownership_bucket(own)
+
+        if bucket == "chalk":
+            exposure_limits[pid] = max_chalk_pct
+        elif bucket == "mega":
+            exposure_limits[pid] = max_mega_pct
+        else:
+            # punt / mid, no hard cap unless set elsewhere
+            exposure_limits[pid] = 1.0
+
+    return exposure_limits
+
+
+def apply_manual_exposure_overrides(
+    exposure_limits: Dict[str, float],
+    manual_overrides: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Apply user-specified overrides to exposure_limits.
+    """
+    for pid, val in manual_overrides.items():
+        exposure_limits[pid] = val
+    return exposure_limits
+
+
+# --- LINEUP OPTIMIZER (SINGLE LINEUP VIA PULP) ---
 
 def optimize_single_lineup(
     slate_df: pd.DataFrame, 
@@ -122,102 +141,89 @@ def optimize_single_lineup(
     # Filter for playable players
     playable_df = slate_df[~slate_df['player_id'].isin(excluded_player_ids)].copy()
     
-    # CRITICAL: Create mappings for safe, quick access (fixes potential multiline issues)
+    # CRITICAL: Create mappings for safe, quick access
     proj_map = playable_df.set_index('player_id')['proj'].to_dict()
     salary_map = playable_df.set_index('player_id')['salary'].to_dict()
-    
+    own_map = playable_df.set_index('player_id')['own'].to_dict()
+
+    # Precompute ownership buckets
+    bucket_map = {
+        pid: classify_ownership_bucket(own_map.get(pid, 0.0))
+        for pid in proj_map.keys()
+    }
+
     # 1. Setup the Problem
-    prob = LpProblem("DFS Lineup Optimization", LpMaximize)
-    
-    # Decision Variables
-    player_vars = LpVariable.dicts("Player", playable_df['player_id'], 0, 1, LpBinary)
-    
-    # 2. Objective Function Components
-    
-    # A. Maximization: Total Projected Points (Use the safe map)
-    total_projection = lpSum(proj_map[pid] * player_vars[pid] 
-                             for pid in playable_df['player_id'])
-    
-    # B. Minimization: Penalty for violating Ownership Targets (Soft Constraint)
-    own_ranges = template.bucket_ranges(slack=bucket_slack)
-    penalty_sum = 0
-    
-    for bucket, (min_count, max_count) in own_ranges.items():
-        bucket_players = playable_df[playable_df['bucket'] == bucket]['player_id'].tolist()
-        
-        if not bucket_players:
-            continue
-            
-        count = lpSum(player_vars[pid] for pid in bucket_players)
-        
-        # Penalize if count is below minimum target
-        under_var = LpVariable(f"Under_{bucket}", lowBound=0)
-        prob += count + under_var >= min_count, f"{bucket} Min Soft"
-        
-        # Penalize if count is above maximum target
-        over_var = LpVariable(f"Over_{bucket}", lowBound=0)
-        prob += count - over_var <= max_count, f"{bucket} Max Soft"
-        
-        # Add penalty: Violating the target costs points (500 points)
-        penalty_sum += 500 * under_var + 500 * over_var
+    prob = LpProblem("DFS_Lineup_Optimization", LpMaximize)
 
-    # 3. Final Objective Function: Maximize Projection - Penalties
-    prob += total_projection - penalty_sum, "Net Score (Maximize Projection & Minimize Penalty)"
-    
-    
-    # 4. Hard Constraints (Must always be met for a valid DK lineup)
-    
-    # A. Salary Cap Constraint (Use the safe map)
-    prob += lpSum(salary_map[pid] * player_vars[pid] 
-                  for pid in playable_df['player_id']) <= template.salary_cap, "Salary Cap"
-                  
-    # B. Roster Size Constraint
-    prob += lpSum(player_vars[pid] for pid in playable_df['player_id']) == template.roster_size, "Roster Size"
+    # Decision variables: x_i = 1 if player i is selected
+    player_vars = {
+        pid: LpVariable(f"x_{pid}", lowBound=0, upBound=1, cat=LpBinary)
+        for pid in proj_map.keys()
+    }
 
-    # C. Min Games Constraint
-    game_ids = playable_df['GameID'].unique()
-    game_vars = LpVariable.dicts("Game", game_ids, 0, 1, LpBinary)
-    
-    for gid in game_ids:
-        game_players = playable_df[playable_df['GameID'] == gid]['player_id'].tolist()
-        prob += lpSum(player_vars[pid] for pid in game_players) <= len(game_players) * game_vars[gid], f"Game Active {gid}"
-    
-    prob += lpSum(game_vars[gid] for gid in game_ids) >= template.min_games, "Minimum Games"
+    # 2. Objective: maximize total projection
+    prob += lpSum([proj_map[pid] * player_vars[pid] for pid in proj_map.keys()]), "Total_Proj"
 
-    # D. Positional Constraints
-    pos_map = template.pos_req
-    
-    pg_players = playable_df[playable_df['positions'].str.contains('PG')]['player_id'].tolist()
-    sg_players = playable_df[playable_df['positions'].str.contains('SG')]['player_id'].tolist()
-    sf_players = playable_df[playable_df['positions'].str.contains('SF')]['player_id'].tolist()
-    pf_players = playable_df[playable_df['positions'].str.contains('PF')]['player_id'].tolist()
-    c_players = playable_df[playable_df['positions'].str.contains('C')]['player_id'].tolist()
+    # 3. Core Constraints
+    # 3a. Roster size
+    prob += lpSum([player_vars[pid] for pid in proj_map.keys()]) == template.roster_size, "Roster_Size"
 
-    prob += lpSum(player_vars[pid] for pid in pg_players) >= pos_map['PG'], "PG Min"
-    prob += lpSum(player_vars[pid] for pid in sg_players) >= pos_map['SG'], "SG Min"
-    prob += lpSum(player_vars[pid] for pid in sf_players) >= pos_map['SF'], "SF Min"
-    prob += lpSum(player_vars[pid] for pid in pf_players) >= pos_map['PF'], "PF Min"
-    prob += lpSum(player_vars[pid] for pid in c_players) >= pos_map['C'], "C Min"
-    
-    prob += lpSum(player_vars[pid] for pid in set(pg_players) | set(sg_players)) >= (pos_map['PG'] + pos_map['SG'] + pos_map['G']), "G Slot Fulfillment"
-    prob += lpSum(player_vars[pid] for pid in set(sf_players) | set(pf_players)) >= (pos_map['SF'] + pos_map['PF'] + pos_map['F']), "F Slot Fulfillment"
-    
-    # E. Lock/Exclude Constraints
+    # 3b. Salary cap
+    prob += lpSum([salary_map[pid] * player_vars[pid] for pid in proj_map.keys()]) <= template.salary_cap, "Salary_Cap"
+
+    # 3c. Locked players must be selected
     for pid in locked_player_ids:
         if pid in player_vars:
-            prob += player_vars[pid] == 1, f"Lock Player {pid}"
-        
-    # 5. Solve the Problem
-    prob.solve(PULP_CBC_CMD(msg=0)) # Suppress output
+            prob += player_vars[pid] == 1, f"Locked_{pid}"
 
-    # 6. Process Results
-    if prob.status == LpStatusOptimal:
-        selected_players = [pid for pid in playable_df['player_id'] if player_vars[pid].varValue == 1]
-        
-        # Return only the list of player IDs (for efficient MCS collection)
-        return selected_players
-    else:
+    # 4. Ownership Bucket Constraints (soft via slack)
+    template_buckets = template.to_dict()
+
+    for bucket_name, required_count in template_buckets.items():
+        # Baseball style: allow +/- bucket_slack
+        lower_bound = max(required_count - bucket_slack, 0)
+        upper_bound = required_count + bucket_slack
+
+        prob += (
+            lpSum(
+                [
+                    player_vars[pid]
+                    for pid, bucket in bucket_map.items()
+                    if bucket == bucket_name
+                ]
+            )
+            >= lower_bound,
+            f"{bucket_name}_lower",
+        )
+        prob += (
+            lpSum(
+                [
+                    player_vars[pid]
+                    for pid, bucket in bucket_map.items()
+                    if bucket == bucket_name
+                ]
+            )
+            <= upper_bound,
+            f"{bucket_name}_upper",
+        )
+
+    # 5. Solve
+    prob.solve(PULP_CBC_CMD(msg=False))
+
+    if LpStatus[prob.status] != "Optimal":
         return None
+
+    selected_ids = [
+        pid for pid, var in player_vars.items() if var.varValue is not None and var.varValue > 0.5
+    ]
+
+    if len(selected_ids) != template.roster_size:
+        return None
+
+    return selected_ids
+
+
+# --- MONTE CARLO SIMULATIONS + EXPOSURE / DIVERSITY ---
 
 def run_monte_carlo_simulations(
     slate_df: pd.DataFrame, 
@@ -235,123 +241,133 @@ def run_monte_carlo_simulations(
     Returns: (list of final lineups (dicts), dict of player exposures)
     """
     
-    raw_optimal_lineups = []
+    raw_optimal_lineups: List[Dict[str, Any]] = []
     sim_df = slate_df.copy()
-    
-    # --- CRITICAL FIX: ENSURE ALL NUMERICAL COLUMNS ARE FLOAT ---
+
+    # --- Ensure numeric columns are valid floats ---
     try:
-        # Use .values.astype to get a pure NumPy array first, then put back into DataFrame
-        sim_df['proj'] = sim_df['proj'].values.astype(np.float64) 
-        sim_df['salary'] = sim_df['salary'].values.astype(np.float64)
+        sim_df['proj'] = pd.to_numeric(sim_df['proj'], errors='coerce')
+        sim_df['salary'] = pd.to_numeric(sim_df['salary'], errors='coerce')
     except Exception as e:
-        print(f"ERROR: Final float conversion failed in builder.py: {e}") 
+        print(f"ERROR: conversion to float failed in run_monte_carlo_simulations: {e}")
         return [], {}
-    
-    # 1. PRE-CALCULATE STATISTICAL VARIANCE
-    sim_df['std_dev'] = sim_df['proj'] * DEFAULT_STD_DEV_PCT
-    
-    # Ensure players with 0 salary/proj/std_dev are safe
+
+    sim_df.dropna(subset=['proj', 'salary'], inplace=True)
+
+    if sim_df.empty:
+        print("ERROR: sim_df empty after numeric cleaning in Monte Carlo.")
+        return [], {}
+
+    # 1. Pre-calculate per-player standard deviation as a % of projection
+    sim_df['std_dev'] = sim_df['proj'].abs() * DEFAULT_STD_DEV_PCT
     sim_df.loc[sim_df['std_dev'] <= 0, 'std_dev'] = 0.1
     sim_df.loc[sim_df['proj'] <= 0, 'proj'] = 0.1
-    
-    # 2. RUN SIMULATIONS
+
+    # 2. Main simulation loop
     for i in range(num_iterations):
-        
-        # REINFORCED STABILITY: Explicitly cast to float for NumPy and use .values.
-        loc_values = sim_df['proj'].values.astype(float)
-        scale_values = sim_df['std_dev'].values.astype(float)
-        
-        # Sample new projections N(mu, sigma)
+        loc_values = sim_df['proj'].to_numpy(dtype=float)
+        scale_values = sim_df['std_dev'].to_numpy(dtype=float)
+
+        # Guard against zero / negative std deviations
+        scale_values = np.where(scale_values <= 0, 0.1, scale_values)
+
         sampled_values = np.random.normal(
-            loc=loc_values, 
+            loc=loc_values,
             scale=scale_values,
             size=len(sim_df)
         )
-        
-        # 🛑 FINAL FIX: Apply the clip operation separately to prevent the C recursion crash
-        sim_df['sampled_proj'] = sampled_values.clip(lower=0.1)
-        
-        # Create a temporary DF with sampled proj as the primary 'proj' column
-        temp_df = sim_df.rename(columns={'sampled_proj': 'proj'})
+
+        # IMPORTANT FIX: clip using np.clip (not .clip(lower=...))
+        sampled_values = np.clip(sampled_values, a_min=0.1, a_max=None)
+
+        # Use sampled projections for this iteration
+        temp_df = sim_df.copy()
+        temp_df['proj'] = sampled_values
 
         lineup_ids = optimize_single_lineup(
             slate_df=temp_df,
             template=template,
             bucket_slack=bucket_slack,
             locked_player_ids=locked_player_ids,
-            excluded_player_ids=excluded_player_ids
+            excluded_player_ids=excluded_player_ids,
         )
-        
+
         if lineup_ids:
-            # Append the lineup IDs and the total projected score for this sim
-            lineup_proj = temp_df[temp_df['player_id'].isin(lineup_ids)]['proj'].sum()
-            
+            lineup_proj = temp_df.loc[
+                temp_df['player_id'].isin(lineup_ids),
+                'proj'
+            ].sum()
+
             raw_optimal_lineups.append({
                 'player_ids': lineup_ids,
-                'proj_score': lineup_proj
+                'proj_score': float(lineup_proj),
             })
 
-    # --- 3. POST-SIMULATION ANALYSIS & FILTERING ---
-    
+    # 3. Post-simulation filtering: max exposure + lineup diversity
     if not raw_optimal_lineups:
         return [], {}
 
-    # Sort lineups by projection (highest projected lineups will be preferred)
+    # Sort by projected score, best first
     raw_optimal_lineups.sort(key=lambda x: x['proj_score'], reverse=True)
-    
-    final_lineups = []
-    
-    # Tally counts for exposure tracking
-    player_counts = {pid: 0 for pid in slate_df['player_id']}
-    
-    # --- Filtered Output Set Size (Max 100 lineups for display) ---
-    max_output_lineups = min(len(raw_optimal_lineups), 100) 
-    
-    
+
+    final_lineups: List[Dict[str, Any]] = []
+    player_counts: Dict[str, int] = {pid: 0 for pid in slate_df['player_id']}
+
+    max_output_lineups = min(len(raw_optimal_lineups), 100)
+
     for lineup in raw_optimal_lineups:
         lineup_ids = lineup['player_ids']
-        
-        # A. Check Max Exposure Constraint
+
+        # A. Max exposure check (max_exposures values are 0–1 fractions)
         violates_exposure = False
         for pid in lineup_ids:
-            # Calculate current projected exposure with this lineup included
             current_total = len(final_lineups)
             current_count = player_counts.get(pid, 0)
-            
-            max_pct = max_exposures.get(pid, 1.0) # Default Max Exposure is 1.0 (100%)
-            
-            # Use a tiny buffer to avoid division by zero or floating point issues on the first iteration
-            if (current_count + 1) / (current_total + 1e-9) > max_pct:
+            max_pct = max_exposures.get(pid, 1.0)
+
+            if max_pct <= 0:
                 violates_exposure = True
                 break
-        
+
+            # exposure if we include this lineup next
+            next_total = current_total + 1
+            next_count = current_count + 1
+            next_exposure = next_count / max(next_total, 1)
+
+            if next_exposure - max_pct > 1e-9:
+                violates_exposure = True
+                break
+
         if violates_exposure:
             continue
 
-        # B. Check Lineup Diversity Constraint (min_lineup_diversity = max shared players)
+        # B. Diversity check (limit shared players with existing lineups)
         is_diverse = True
-        for existing_lineup in final_lineups:
-            shared_count = len(set(lineup_ids) & set(existing_lineup['player_ids']))
-            if shared_count > min_lineup_diversity:
+        for existing in final_lineups:
+            shared = len(set(lineup_ids) & set(existing['player_ids']))
+            if shared > min_lineup_diversity:
                 is_diverse = False
                 break
-        
-        if is_diverse:
-            final_lineups.append(lineup)
-            
-            # Update player counts for exposure tracking
-            for pid in lineup_ids:
-                player_counts[pid] = player_counts.get(pid, 0) + 1
-            
-            if len(final_lineups) >= max_output_lineups:
-                break
-    
-    # Calculate final exposures based on the filtered set
-    total_lineups_count = len(final_lineups)
-    
+
+        if not is_diverse:
+            continue
+
+        # Passed both gates; keep lineup
+        final_lineups.append(lineup)
+        for pid in lineup_ids:
+            player_counts[pid] = player_counts.get(pid, 0) + 1
+
+        if len(final_lineups) >= max_output_lineups:
+            break
+
+    total_lineups = len(final_lineups)
+    if total_lineups == 0:
+        return [], {}
+
     final_exposures = {
-        pid: (count / total_lineups_count) * 100 if total_lineups_count > 0 else 0
-        for pid, count in player_counts.items() 
+        pid: round((count / total_lineups) * 100, 1)
+        for pid, count in player_counts.items()
+        if count > 0
     }
-    
+
     return final_lineups, final_exposures
