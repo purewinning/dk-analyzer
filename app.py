@@ -106,7 +106,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             st.error(f"Error processing file: {e}")
             return pd.DataFrame()
     else:
-        # --- Placeholder Data (CORRECTED AND CONDENSED) ---
+        # --- Placeholder Data ---
         data = {
             'player_id': [f'P{i}' for i in range(1, 15)],
             'Name': [f'Player {i}' for i in range(1, 15)],
@@ -148,7 +148,7 @@ def tab_lineup_builder(slate_df, template):
     # --- A. PLAYER POOL EDITOR ---
     st.markdown("Use the table below to **Lock** (Force In), **Exclude** (Ban), or **Edit** projections.")
     
-    # Define column config for the editor (CONDENSED)
+    # Define column config for the editor
     column_config = {"Name": st.column_config.TextColumn("Player Name", disabled=True), "positions": st.column_config.TextColumn("Pos", disabled=True), "salary": st.column_config.NumberColumn("Salary", format="$%d"), "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), "player_id": None, "GameID": None}
     
     # The Interactive Data Editor
@@ -192,5 +192,99 @@ def tab_lineup_builder(slate_df, template):
         final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
 
         with st.spinner(f'Optimizing...'):
+            # VERIFIED: The parenthesis is now closed
             optimal_lineup_df = build_optimal_lineup(
                 slate_df=final_df,
+                template=template,
+                bucket_slack=1,
+                locked_player_ids=locked_players,
+                excluded_player_ids=excluded_players
+            )
+        
+        if optimal_lineup_df is not None:
+            total_salary = optimal_lineup_df['salary'].sum()
+            total_points = optimal_lineup_df['proj'].sum()
+            games_used = optimal_lineup_df['GameID'].nunique()
+            
+            st.success("### 🏆 Optimal Lineup Found")
+            
+            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+            
+            # Format dataframe for pretty display
+            st.dataframe(
+                lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "own_proj": "{:.1f}%"}),
+                use_container_width=True
+            )
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Projection", f"{total_points:.2f}")
+            col2.metric("Salary Used", f"${total_salary:,}")
+            col3.metric("Games", f"{games_used}")
+            
+        else:
+            st.error("❌ No valid lineup found. This means your player pool (data) conflicts with the contest rules (constraints).")
+
+def tab_contest_analyzer(slate_df, template):
+    """Render the Contest Analyzer."""
+    st.header("Contest Strategy Analyzer")
+    st.info(f"Analysis based on: **{template.contest_label}**")
+
+    st.subheader("Target Ownership Structure")
+    ranges = template.bucket_ranges(slack=1) 
+    
+    range_data = {
+        "Ownership Bucket": ["Punt (<10%)", "Mid (10-30%)", "Chalk (30-40%)", "Mega Chalk (>40%)"],
+        "Target Player Count": [
+            f"{ranges['punt'][0]}-{ranges['punt'][1]}",
+            f"{ranges['mid'][0]}-{ranges['mid'][1]}",
+            f"{ranges['chalk'][0]}-{ranges['chalk'][1]}",
+            f"{ranges['mega'][0]}-{ranges['mega'][1]}"
+        ]
+    }
+    st.table(pd.DataFrame(range_data))
+
+    st.subheader("Your Player Pool Distribution")
+    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
+    st.bar_chart(pool_counts)
+
+
+# --- 4. MAIN ENTRY POINT ---
+
+if __name__ == '__main__':
+    st.set_page_config(layout="wide", page_title="DK Lineup Builder")
+    
+    # Sidebar
+    with st.sidebar:
+        st.title("🏀 DK Builder")
+        contest_type = st.selectbox("Contest Strategy", ['GPP (Single Entry)', 'GPP (Large Field)', 'CASH'])
+        
+        # Map selection
+        c_map = {'GPP (Single Entry)': 'SE', 'GPP (Large Field)': 'LARGE_GPP', 'CASH': 'CASH'}
+        contest_code = c_map[contest_type]
+        
+        st.divider()
+        uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
+        
+    # Load Data
+    slate_df = load_and_preprocess_data(uploaded_file)
+    if slate_df.empty:
+        st.stop()
+        
+    # Build Template
+    template = build_template_from_params(
+        contest_type=contest_code, 
+        field_size=10000, 
+        pct_to_first=30.0,
+        roster_size=DEFAULT_ROSTER_SIZE,
+        salary_cap=DEFAULT_SALARY_CAP,
+        min_games=MIN_GAMES_REQUIRED
+    )
+
+    # Tabs
+    t1, t2 = st.tabs(["🚀 Lineup Builder", "📊 Contest Analyzer"])
+    
+    with t1:
+        tab_lineup_builder(slate_df, template)
+    with t2:
+        tab_contest_analyzer(slate_df, template)
