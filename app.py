@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List
-# Ensure this import block is perfectly copied
+# Ensure this block is exactly correct, including the final closing parenthesis.
 from builder import (
     build_template_from_params, 
     build_optimal_lineup, 
@@ -150,7 +150,7 @@ def tab_lineup_builder(slate_df, template):
     st.markdown("Use the table below to **Lock** (Force In), **Exclude** (Ban), or **Edit** projections.")
     
     # Define column config for the editor (CONDENSED)
-    column_config = {"Name": st.column_config.TextColumn("Player Name", disabled=True), "positions": st.column_config.TextColumn("Pos", disabled=True), "salary": st.column_config.NumberColumn("Salary", format="$%d"), "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), "player_id": None, "GameID": None}
+    column_config = {"Name": st.column_config.TextColumn("Player Name", disabled=True), "positions": st.column_config.TextColumn("Pos", disabled=True), "salary": st.column_config.NumberColumn("Salary", format="$%d"), "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), "player_id": None, "GameID": None, "Team": None, "Opponent": None}
     
     # The Interactive Data Editor
     edited_df = st.data_editor(
@@ -223,7 +223,7 @@ def tab_lineup_builder(slate_df, template):
             col3.metric("Games", f"{games_used}")
             
         else:
-            st.error("❌ No valid lineup found. This means your player pool (data) conflicts with the contest rules (constraints).")
+            st.error("❌ CRITICAL FAILURE: Check hard constraints (Salary Cap, Roster Size, Positional Minimums, Min Games).")
 
 def tab_contest_analyzer(slate_df, template):
     """Render the Contest Analyzer."""
