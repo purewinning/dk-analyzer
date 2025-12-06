@@ -1,7 +1,7 @@
 # builder.py
 
 import pandas as pd
-import numpy as np # <-- NEW REQUIREMENT
+import numpy as np 
 from pulp import *
 from typing import Dict, List, Tuple, Union, Any
 
@@ -231,15 +231,19 @@ def run_monte_carlo_simulations(
     Returns: (list of final lineups (dicts), dict of player exposures)
     """
     
-    # 1. PRE-CALCULATE STATISTICAL VARIANCE
-    # Add a Standard Deviation column (Default: 20% of projection)
-    slate_df['std_dev'] = slate_df['proj'] * DEFAULT_STD_DEV_PCT
-    
     raw_optimal_lineups = []
-    
-    # Ensure players with 0 salary/proj aren't throwing errors (safety check)
     sim_df = slate_df.copy()
-    sim_df.loc[sim_df['std_dev'] == 0, 'std_dev'] = 0.1
+    
+    # --- CRITICAL FIX: ENSURE ALL NUMERICAL COLUMNS ARE FLOAT ---
+    # Convert core projection and salary columns to float64 to prevent NumPy type errors
+    sim_df['proj'] = sim_df['proj'].astype(np.float64)
+    sim_df['salary'] = sim_df['salary'].astype(np.float64)
+    
+    # 1. PRE-CALCULATE STATISTICAL VARIANCE
+    sim_df['std_dev'] = sim_df['proj'] * DEFAULT_STD_DEV_PCT
+    
+    # Ensure players with 0 salary/proj/std_dev are safe
+    sim_df.loc[sim_df['std_dev'] <= 0, 'std_dev'] = 0.1
     sim_df.loc[sim_df['proj'] <= 0, 'proj'] = 0.1
     
     # 2. RUN SIMULATIONS
@@ -294,9 +298,14 @@ def run_monte_carlo_simulations(
         # A. Check Max Exposure Constraint
         violates_exposure = False
         for pid in lineup_ids:
-            max_pct = max_exposures.get(pid, 1.0) # Default Max Exposure is 100% (1.0)
+            # Calculate current projected exposure with this lineup included
+            current_total = len(final_lineups)
+            current_count = player_counts.get(pid, 0)
             
-            if (player_counts.get(pid, 0) + 1) / (len(final_lineups) + 1) > max_pct:
+            max_pct = max_exposures.get(pid, 1.0) # Default Max Exposure is 1.0 (100%)
+            
+            # Use a tiny buffer to avoid division by zero or floating point issues on the first iteration
+            if (current_count + 1) / (current_total + 1e-9) > max_pct:
                 violates_exposure = True
                 break
         
@@ -304,7 +313,6 @@ def run_monte_carlo_simulations(
             continue
 
         # B. Check Lineup Diversity Constraint (min_lineup_diversity = max shared players)
-        # Check against existing lineups in the final set
         is_diverse = True
         for existing_lineup in final_lineups:
             shared_count = len(set(lineup_ids) & set(existing_lineup['player_ids']))
@@ -326,9 +334,8 @@ def run_monte_carlo_simulations(
     total_lineups_count = len(final_lineups)
     
     final_exposures = {
-        pid: (count / total_lineups_count) * 100
+        pid: (count / total_lineups_count) * 100 if total_lineups_count > 0 else 0
         for pid, count in player_counts.items() 
-        if count > 0
     }
     
     return final_lineups, final_exposures
