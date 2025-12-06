@@ -153,4 +153,125 @@ def find_single_optimal_lineup(
         
         # Penalize if count is below minimum target
         under_var = LpVariable(f"Under_{bucket}", lowBound=0)
-        prob += count + under_var >= min_count, f"{bucket}
+        prob += count + under_var >= min_count, f"{bucket} Min Soft"
+        
+        # Penalize if count is above maximum target
+        over_var = LpVariable(f"Over_{bucket}", lowBound=0)
+        prob += count - over_var <= max_count, f"{bucket} Max Soft"
+        
+        # Add penalty: Violating the target costs points (500 points)
+        penalty_sum += 500 * under_var + 500 * over_var
+
+    # 3. Final Objective Function: Maximize Projection - Penalties
+    prob += total_projection - penalty_sum, "Net Score (Maximize Projection & Minimize Penalty)"
+    
+    
+    # 4. Hard Constraints (Must always be met for a valid DK lineup)
+    
+    # A. Salary Cap Constraint 
+    prob += lpSum(salary_map[pid] * player_vars[pid] 
+                  for pid in all_player_ids) <= template.salary_cap, "Salary Cap"
+                  
+    # B. Roster Size Constraint
+    prob += lpSum(player_vars[pid] for pid in all_player_ids) == template.roster_size, "Roster Size"
+
+    # C. Min Games Constraint
+    game_ids = playable_df['GameID'].unique()
+    game_vars = LpVariable.dicts("Game", game_ids, 0, 1, LpBinary)
+    
+    for gid in game_ids:
+        game_players = playable_df[playable_df['GameID'] == gid]['player_id'].tolist()
+        prob += lpSum(player_vars[pid] for pid in game_players) <= len(game_players) * game_vars[gid], f"Game Active {gid}"
+    
+    prob += lpSum(game_vars[gid] for gid in game_ids) >= template.min_games, "Minimum Games"
+
+    # D. Positional Constraints
+    pos_map = template.pos_req
+    
+    pg_players = playable_df[playable_df['positions'].str.contains('PG')]['player_id'].tolist()
+    sg_players = playable_df[playable_df['positions'].str.contains('SG')]['player_id'].tolist()
+    sf_players = playable_df[playable_df['positions'].str.contains('SF')]['player_id'].tolist()
+    pf_players = playable_df[playable_df['positions'].str.contains('PF')]['player_id'].tolist()
+    c_players = playable_df[playable_df['positions'].str.contains('C')]['player_id'].tolist()
+
+    prob += lpSum(player_vars[pid] for pid in pg_players) >= pos_map['PG'], "PG Min"
+    prob += lpSum(player_vars[pid] for pid in sg_players) >= pos_map['SG'], "SG Min"
+    prob += lpSum(player_vars[pid] for pid in sf_players) >= pos_map['SF'], "SF Min"
+    prob += lpSum(player_vars[pid] for pid in pf_players) >= pos_map['PF'], "PF Min"
+    prob += lpSum(player_vars[pid] for pid in c_players) >= pos_map['C'], "C Min"
+    
+    prob += lpSum(player_vars[pid] for pid in set(pg_players) | set(sg_players)) >= (pos_map['PG'] + pos_map['SG'] + pos_map['G']), "G Slot Fulfillment"
+    prob += lpSum(player_vars[pid] for pid in set(sf_players) | set(pf_players)) >= (pos_map['SF'] + pos_map['PF'] + pos_map['F']), "F Slot Fulfillment"
+    
+    # E. Lock/Exclude Constraints
+    for pid in locked_player_ids:
+        if pid in player_vars:
+            prob += player_vars[pid] == 1, f"Lock Player {pid}"
+        
+    # F. PREVIOUS SOLUTION EXCLUSION CONSTRAINT
+    if previous_lineup_vectors:
+        for i, prev_vector in enumerate(previous_lineup_vectors):
+            # Sum of the players in the previous lineup must be LESS THAN the total roster size (8)
+            # This forces at least one player to be different.
+            prob += lpSum(player_vars[pid] for pid in all_player_ids if prev_vector.get(pid, 0) == 1) <= template.roster_size - 1, f"Exclude Lineup {i+1}"
+
+    # 5. Solve the Problem
+    prob.solve(PULP_CBC_CMD(msg=0)) 
+
+    # 6. Process Results
+    if prob.status == LpStatusOptimal:
+        # Get the selected players for the current optimal lineup
+        selected_players = [pid for pid in all_player_ids if player_vars[pid].varValue == 1]
+        total_proj = sum(proj_map.get(pid, 0) for pid in selected_players)
+        
+        # Prepare the binary solution vector for the next iteration's exclusion constraint
+        solution_vector = {pid: player_vars[pid].varValue for pid in all_player_ids}
+        
+        return {
+            'player_ids': selected_players,
+            'proj_score': total_proj,
+            'solution_vector': solution_vector # Store the solution for exclusion
+        }
+    else:
+        return None
+
+
+def generate_top_n_lineups(
+    slate_df: pd.DataFrame, 
+    template: 'LineupTemplate', 
+    n_lineups: int, 
+    bucket_slack: int,
+    locked_player_ids: List[str], 
+    excluded_player_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """Generates the top N optimal lineups sequentially."""
+    
+    all_lineups = []
+    previous_solution_vectors = []
+    
+    for i in range(n_lineups):
+        
+        # Solve for the next best lineup, excluding all previous ones
+        result = find_single_optimal_lineup(
+            slate_df=slate_df,
+            template=template,
+            bucket_slack=bucket_slack,
+            locked_player_ids=locked_player_ids,
+            excluded_player_ids=excluded_player_ids,
+            previous_lineup_vectors=previous_solution_vectors
+        )
+        
+        if result is None:
+            # No more feasible solutions found
+            break
+            
+        # Store the lineup data (without the large solution vector)
+        all_lineups.append({
+            'player_ids': result['player_ids'],
+            'proj_score': result['proj_score']
+        })
+        
+        # Save the current optimal lineup's solution vector for the next exclusion constraint
+        previous_solution_vectors.append(result['solution_vector'])
+        
+    return all_lineups
