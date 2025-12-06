@@ -3,9 +3,7 @@ import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List, Tuple
 import io 
-
-# Import simulation engine
-from simulation_engine import TournamentSimulator, run_simulation_analysis
+import random
 
 # NOTE: The 'builder' module is assumed to be correct and unchanged.
 from builder import (
@@ -22,6 +20,225 @@ st.set_page_config(layout="wide", page_title="🏀 DK Lineup Optimizer")
 
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
+
+# --- TOURNAMENT SIMULATOR CLASS ---
+class TournamentSimulator:
+    """
+    Simulates DFS tournaments to analyze lineup construction patterns and win probability.
+    """
+    
+    def __init__(self, slate_df: pd.DataFrame, field_size: int = 10000):
+        """
+        Initialize simulator with player pool data.
+        
+        Args:
+            slate_df: DataFrame with player data (proj, own_proj, salary, etc.)
+            field_size: Number of entries in the tournament
+        """
+        self.slate_df = slate_df.copy()
+        self.field_size = field_size
+        
+        # Calculate player variance (std dev) based on projection
+        # Higher projection = higher variance (stars are more volatile)
+        self.slate_df['std_dev'] = self.slate_df['proj'] * 0.25  # 25% std dev
+        
+    def simulate_player_score(self, player_row, n_simulations=1):
+        """
+        Simulate actual fantasy scores for a player using normal distribution.
+        
+        Args:
+            player_row: Row from slate_df with player data
+            n_simulations: Number of simulations to run
+            
+        Returns:
+            Array of simulated scores
+        """
+        return np.random.normal(
+            loc=player_row['proj'],
+            scale=player_row['std_dev'],
+            size=n_simulations
+        ).clip(min=0)  # Can't score negative points
+    
+    def simulate_lineup_score(self, player_ids: List[str], n_simulations=1000):
+        """
+        Simulate a lineup's score distribution across many contests.
+        
+        Args:
+            player_ids: List of player IDs in the lineup
+            n_simulations: Number of simulations to run
+            
+        Returns:
+            Array of simulated total scores for the lineup
+        """
+        lineup_players = self.slate_df[self.slate_df['player_id'].isin(player_ids)]
+        
+        # Simulate each player's scores
+        simulated_scores = np.zeros(n_simulations)
+        
+        for _, player in lineup_players.iterrows():
+            player_sims = self.simulate_player_score(player, n_simulations)
+            simulated_scores += player_sims
+            
+        return simulated_scores
+    
+    def generate_field_ownership(self):
+        """
+        Generate a tournament field with ownership-based lineup distribution.
+        Returns distribution of how many lineups used each player.
+        """
+        field_usage = {}
+        
+        for _, player in self.slate_df.iterrows():
+            # Number of lineups using this player (based on ownership %)
+            n_lineups_with_player = int(self.field_size * (player['own_proj'] / 100))
+            field_usage[player['player_id']] = n_lineups_with_player
+            
+        return field_usage
+    
+    def calculate_win_probability(
+        self, 
+        lineup_player_ids: List[str],
+        n_simulations: int = 1000
+    ) -> Dict[str, float]:
+        """
+        Calculate probability of winning/placing based on simulations.
+        
+        Args:
+            lineup_player_ids: List of player IDs in your lineup
+            n_simulations: Number of tournament simulations to run
+            
+        Returns:
+            Dictionary with win rates for different placements
+        """
+        # Get your lineup's simulated scores
+        your_scores = self.simulate_lineup_score(lineup_player_ids, n_simulations)
+        
+        # Generate field ownership
+        field_usage = self.generate_field_ownership()
+        
+        # Calculate ownership leverage (how unique is your lineup?)
+        your_players = set(lineup_player_ids)
+        total_field_exposure = sum(field_usage.get(pid, 0) for pid in lineup_player_ids)
+        avg_exposure = total_field_exposure / (len(lineup_player_ids) * self.field_size)
+        
+        # Simulate winning scores (top 1% of field needs to beat)
+        # Assuming field scores are normally distributed around average projection
+        avg_field_projection = self.slate_df.nsmallest(8, 'salary')['proj'].sum()
+        field_std = avg_field_projection * 0.15
+        
+        winning_scores = np.random.normal(
+            loc=avg_field_projection * 1.3,  # Winners score 30% above average
+            scale=field_std,
+            size=n_simulations
+        )
+        
+        top10_scores = np.random.normal(
+            loc=avg_field_projection * 1.15,  # Top 10% scores 15% above average
+            scale=field_std,
+            size=n_simulations
+        )
+        
+        # Calculate win probabilities
+        win_rate = np.mean(your_scores > winning_scores)
+        top10_rate = np.mean(your_scores > top10_scores)
+        
+        return {
+            'win_rate': win_rate * 100,
+            'top10_rate': top10_rate * 100,
+            'avg_score': np.mean(your_scores),
+            'ceiling': np.percentile(your_scores, 90),
+            'floor': np.percentile(your_scores, 10),
+            'ownership_leverage': (1 - avg_exposure) * 100,
+            'leverage_score': win_rate * (1 - avg_exposure) * 1000
+        }
+    
+    def analyze_ownership_pattern(
+        self,
+        lineup_player_ids: List[str]
+    ) -> Dict[str, any]:
+        """
+        Analyze the ownership construction pattern of a lineup.
+        
+        Returns breakdown by ownership bucket and strategic insights.
+        """
+        lineup_players = self.slate_df[self.slate_df['player_id'].isin(lineup_player_ids)]
+        
+        # Count players in each bucket
+        bucket_counts = lineup_players['bucket'].value_counts().to_dict()
+        
+        # Calculate weighted ownership
+        avg_ownership = lineup_players['own_proj'].mean()
+        
+        # Calculate leverage (uniqueness)
+        leverage_score = 0
+        for _, player in lineup_players.iterrows():
+            # Lower ownership = higher leverage
+            player_leverage = (100 - player['own_proj']) / 100
+            leverage_score += player_leverage
+        leverage_score = leverage_score / len(lineup_players)
+        
+        return {
+            'mega_chalk_count': bucket_counts.get('mega', 0),
+            'chalk_count': bucket_counts.get('chalk', 0),
+            'mid_count': bucket_counts.get('mid', 0),
+            'punt_count': bucket_counts.get('punt', 0),
+            'avg_ownership': avg_ownership,
+            'leverage_score': leverage_score * 100,
+            'strategy': self._classify_strategy(bucket_counts, avg_ownership)
+        }
+    
+    def _classify_strategy(self, bucket_counts, avg_ownership):
+        """Classify lineup strategy based on construction."""
+        mega = bucket_counts.get('mega', 0)
+        chalk = bucket_counts.get('chalk', 0)
+        
+        if mega >= 2 or chalk >= 4:
+            return "Chalk Heavy"
+        elif bucket_counts.get('punt', 0) >= 3:
+            return "Contrarian Punt"
+        elif avg_ownership < 20:
+            return "Full Contrarian"
+        else:
+            return "Balanced"
+    
+    def compare_strategies(
+        self,
+        lineups_dict: Dict[str, List[str]],
+        n_simulations: int = 1000
+    ) -> pd.DataFrame:
+        """
+        Compare multiple lineup strategies side-by-side.
+        
+        Args:
+            lineups_dict: Dict of {lineup_name: [player_ids]}
+            n_simulations: Number of simulations per lineup
+            
+        Returns:
+            DataFrame comparing all strategies
+        """
+        results = []
+        
+        for name, player_ids in lineups_dict.items():
+            win_prob = self.calculate_win_probability(player_ids, n_simulations)
+            ownership = self.analyze_ownership_pattern(player_ids)
+            
+            results.append({
+                'Lineup': name,
+                'Strategy': ownership['strategy'],
+                'Win Rate %': win_prob['win_rate'],
+                'Top 10% Rate': win_prob['top10_rate'],
+                'Avg Score': win_prob['avg_score'],
+                'Ceiling (90th)': win_prob['ceiling'],
+                'Floor (10th)': win_prob['floor'],
+                'Avg Own %': ownership['avg_ownership'],
+                'Leverage Score': win_prob['leverage_score'],
+                'Mega Chalk': ownership['mega_chalk_count'],
+                'Chalk': ownership['chalk_count'],
+                'Mid': ownership['mid_count'],
+                'Punt': ownership['punt_count']
+            })
+        
+        return pd.DataFrame(results)
 
 # --- HEADER MAPPING ---
 REQUIRED_CSV_TO_INTERNAL_MAP = {
