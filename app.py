@@ -1170,13 +1170,13 @@ def tab_results_analysis(slate_df, template):
         
         # Check lineup performance if lineups exist
         if st.session_state['optimal_lineups_results'].get('ran', False):
-            st.subheader("🏆 Your Lineups - Actual Performance")
+            st.subheader("🏆 Your Lineups - Tournament Performance")
             
             lineups = st.session_state['optimal_lineups_results']['lineups']
             
             lineup_performance = []
             
-            for i, lineup in enumerate(lineups[:10]):  # Top 10 lineups
+            for i, lineup in enumerate(lineups[:20]):  # All generated lineups
                 lineup_players = results_df[results_df['player_id'].isin(lineup['player_ids'])]
                 
                 # Calculate actual score if all players have results
@@ -1185,43 +1185,232 @@ def tab_results_analysis(slate_df, template):
                     proj_score = lineup['proj_score']
                     diff = actual_score - proj_score
                     
+                    # Get salary and ownership info
+                    total_salary = lineup_players['salary'].sum()
+                    avg_ownership = lineup_players['own_proj'].mean()
+                    actual_avg_own = lineup_players['actual_own'].mean()
+                    
+                    # Count bucket distribution
+                    bucket_counts = lineup_players['bucket'].value_counts().to_dict()
+                    
                     lineup_performance.append({
                         'Lineup': f"Lineup {i+1}",
                         'Projected': proj_score,
                         'Actual': actual_score,
                         'Difference': diff,
-                        'Accuracy %': (actual_score / proj_score * 100) - 100
+                        'Accuracy %': ((actual_score / proj_score) - 1) * 100,
+                        'Salary': total_salary,
+                        'Proj Own%': avg_ownership,
+                        'Actual Own%': actual_avg_own,
+                        'Mega': bucket_counts.get('mega', 0),
+                        'Chalk': bucket_counts.get('chalk', 0),
+                        'Mid': bucket_counts.get('mid', 0),
+                        'Punt': bucket_counts.get('punt', 0),
+                        'player_ids': lineup['player_ids']
                     })
             
             if lineup_performance:
                 perf_df = pd.DataFrame(lineup_performance)
                 
-                # Highlight best performing lineup
-                def highlight_best(s):
-                    if s.name == 'Actual':
-                        max_val = s.max()
-                        return ['background-color: #90EE90; font-weight: bold' if v == max_val else '' for v in s]
+                # Sort by actual score (best to worst)
+                perf_df = perf_df.sort_values('Actual', ascending=False).reset_index(drop=True)
+                perf_df['Rank'] = range(1, len(perf_df) + 1)
+                
+                # Tournament placement analysis
+                st.markdown("---")
+                st.subheader("🎯 Tournament Leaderboard")
+                
+                # Show top 3 with medals
+                col1, col2, col3 = st.columns(3)
+                
+                if len(perf_df) >= 1:
+                    with col1:
+                        st.markdown("### 🥇 1st Place")
+                        st.metric("Lineup", perf_df.iloc[0]['Lineup'])
+                        st.metric("Actual Score", f"{perf_df.iloc[0]['Actual']:.2f}")
+                        st.metric("Beat Projection By", f"{perf_df.iloc[0]['Difference']:+.2f}")
+                
+                if len(perf_df) >= 2:
+                    with col2:
+                        st.markdown("### 🥈 2nd Place")
+                        st.metric("Lineup", perf_df.iloc[1]['Lineup'])
+                        st.metric("Actual Score", f"{perf_df.iloc[1]['Actual']:.2f}")
+                        st.metric("Beat Projection By", f"{perf_df.iloc[1]['Difference']:+.2f}")
+                
+                if len(perf_df) >= 3:
+                    with col3:
+                        st.markdown("### 🥉 3rd Place")
+                        st.metric("Lineup", perf_df.iloc[2]['Lineup'])
+                        st.metric("Actual Score", f"{perf_df.iloc[2]['Actual']:.2f}")
+                        st.metric("Beat Projection By", f"{perf_df.iloc[2]['Difference']:+.2f}")
+                
+                st.markdown("---")
+                
+                # Full leaderboard
+                st.subheader("📊 Complete Lineup Rankings")
+                
+                display_cols = ['Rank', 'Lineup', 'Actual', 'Projected', 'Difference', 'Accuracy %', 
+                               'Salary', 'Proj Own%', 'Actual Own%', 'Mega', 'Chalk', 'Mid', 'Punt']
+                display_perf = perf_df[display_cols].copy()
+                
+                # Color code top 3
+                def highlight_podium(s):
+                    if s.name == 'Rank':
+                        colors = []
+                        for v in s:
+                            if v == 1:
+                                colors.append('background-color: #FFD700; font-weight: bold')  # Gold
+                            elif v == 2:
+                                colors.append('background-color: #C0C0C0; font-weight: bold')  # Silver
+                            elif v == 3:
+                                colors.append('background-color: #CD7F32; font-weight: bold')  # Bronze
+                            else:
+                                colors.append('')
+                        return colors
                     return ['' for _ in s]
                 
-                st.dataframe(
-                    perf_df.style.apply(highlight_best, axis=0).format({
-                        'Projected': '{:.2f}',
-                        'Actual': '{:.2f}',
-                        'Difference': '{:+.2f}',
-                        'Accuracy %': '{:+.1f}%'
-                    }),
-                    use_container_width=True,
-                    hide_index=True
+                styled_perf = display_perf.style.apply(highlight_podium, axis=0).format({
+                    'Projected': '{:.2f}',
+                    'Actual': '{:.2f}',
+                    'Difference': '{:+.2f}',
+                    'Accuracy %': '{:+.1f}%',
+                    'Salary': '${:,}',
+                    'Proj Own%': '{:.1f}%',
+                    'Actual Own%': '{:.1f}%'
+                })
+                
+                st.dataframe(styled_perf, use_container_width=True, hide_index=True)
+                
+                st.markdown("---")
+                
+                # Detailed view selector
+                st.subheader("🔍 Lineup Details")
+                
+                selected_lineup = st.selectbox(
+                    "Select lineup to view player breakdown:",
+                    options=perf_df['Lineup'].tolist(),
+                    help="See which players hit/missed in each lineup"
                 )
                 
-                # Show best lineup details
-                best_lineup_idx = perf_df['Actual'].idxmax()
-                best_lineup_num = int(perf_df.iloc[best_lineup_idx]['Lineup'].split()[1]) - 1
+                # Get selected lineup data
+                selected_idx = perf_df[perf_df['Lineup'] == selected_lineup].index[0]
+                selected_lineup_data = perf_df.iloc[selected_idx]
+                selected_player_ids = selected_lineup_data['player_ids']
                 
-                st.markdown(f"**Best Performing Lineup: {perf_df.iloc[best_lineup_idx]['Lineup']}**")
-                st.markdown(f"Actual Score: **{perf_df.iloc[best_lineup_idx]['Actual']:.2f}** points")
+                # Display lineup metrics
+                col1, col2, col3, col4, col5 = st.columns(5)
+                with col1:
+                    st.metric("Rank", f"#{selected_lineup_data['Rank']}")
+                with col2:
+                    st.metric("Actual Score", f"{selected_lineup_data['Actual']:.2f}")
+                with col3:
+                    st.metric("vs Projection", f"{selected_lineup_data['Difference']:+.2f}")
+                with col4:
+                    st.metric("Avg Ownership", f"{selected_lineup_data['Actual Own%']:.1f}%")
+                with col5:
+                    st.metric("Construction", f"{int(selected_lineup_data['Mega'])}-{int(selected_lineup_data['Chalk'])}-{int(selected_lineup_data['Mid'])}-{int(selected_lineup_data['Punt'])}")
                 
-                # Show the players in that lineup
+                # Show player breakdown
+                lineup_detail = results_df[results_df['player_id'].isin(selected_player_ids)].copy()
+                lineup_detail['pts_diff'] = lineup_detail['actual_pts'] - lineup_detail['proj']
+                lineup_detail['own_diff'] = lineup_detail['actual_own'] - lineup_detail['own_proj']
+                
+                # Assign positions
+                lineup_detail = assign_lineup_positions(lineup_detail)
+                
+                if lineup_detail is not None:
+                    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+                    position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
+                    lineup_detail['roster_slot'] = lineup_detail['roster_slot'].astype(position_type)
+                    lineup_detail = lineup_detail.sort_values('roster_slot')
+                    
+                    display_cols = ['roster_slot', 'Name', 'positions', 'salary', 'proj', 'actual_pts', 
+                                   'pts_diff', 'own_proj', 'actual_own', 'bucket']
+                    lineup_display = lineup_detail[display_cols].copy()
+                    
+                    lineup_display.rename(columns={
+                        'roster_slot': 'SLOT',
+                        'positions': 'POS',
+                        'proj': 'Proj',
+                        'actual_pts': 'Actual',
+                        'pts_diff': '+/-',
+                        'own_proj': 'Proj Own%',
+                        'actual_own': 'Actual Own%',
+                        'bucket': 'Category'
+                    }, inplace=True)
+                    
+                    # Style with positive/negative differences
+                    def color_diff(val):
+                        if isinstance(val, (int, float)):
+                            if val > 5:
+                                return 'background-color: #90EE90'  # Green for good
+                            elif val < -5:
+                                return 'background-color: #FFB6C6'  # Red for bad
+                        return ''
+                    
+                    styled_lineup = lineup_display.style.applymap(
+                        color_bucket, subset=['Category']
+                    ).applymap(
+                        color_diff, subset=['+/-']
+                    ).format({
+                        'salary': '${:,}',
+                        'Proj': '{:.1f}',
+                        'Actual': '{:.1f}',
+                        '+/-': '{:+.1f}',
+                        'Proj Own%': '{:.1f}%',
+                        'Actual Own%': '{:.1f}%'
+                    })
+                    
+                    st.dataframe(styled_lineup, use_container_width=True, hide_index=True)
+                    
+                    # Key insights
+                    st.markdown("**Key Insights:**")
+                    best_player = lineup_detail.loc[lineup_detail['pts_diff'].idxmax()]
+                    worst_player = lineup_detail.loc[lineup_detail['pts_diff'].idxmin()]
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.success(f"✅ **Best Pick:** {best_player['Name']} ({best_player['pts_diff']:+.1f} vs proj)")
+                    with col2:
+                        if worst_player['pts_diff'] < -5:
+                            st.error(f"❌ **Worst Pick:** {worst_player['Name']} ({worst_player['pts_diff']:+.1f} vs proj)")
+                        else:
+                            st.info(f"⚠️ **Lowest:** {worst_player['Name']} ({worst_player['pts_diff']:+.1f} vs proj)")
+                
+                st.markdown("---")
+                
+                # Strategy analysis
+                st.subheader("📈 Strategy Performance Analysis")
+                
+                # Group by construction pattern
+                perf_df['Construction'] = (perf_df['Mega'].astype(str) + '-' + 
+                                          perf_df['Chalk'].astype(str) + '-' + 
+                                          perf_df['Mid'].astype(str) + '-' + 
+                                          perf_df['Punt'].astype(str))
+                
+                strategy_analysis = perf_df.groupby('Construction').agg({
+                    'Actual': ['mean', 'max', 'min'],
+                    'Difference': 'mean',
+                    'Accuracy %': 'mean'
+                }).round(2)
+                
+                strategy_analysis.columns = ['Avg Score', 'Best Score', 'Worst Score', 'Avg Diff', 'Avg Accuracy %']
+                strategy_analysis = strategy_analysis.sort_values('Avg Score', ascending=False)
+                
+                st.dataframe(strategy_analysis, use_container_width=True)
+                
+                st.markdown("""
+                **Construction Format:** Mega-Chalk-Mid-Punt
+                - **Mega** = >40% ownership
+                - **Chalk** = 30-40% ownership
+                - **Mid** = 10-30% ownership
+                - **Punt** = <10% ownership
+                """)
+                
+            else:
+                st.info("⚠️ Some players in your lineups don't have actual results yet. Load complete results to see performance.")
+        else:
+            st.info("💡 Generate lineups in the 'Lineup Builder' tab first, then come back here after games finish to see how they performed!")       # Show the players in that lineup
                 best_lineup_player_ids = lineups[best_lineup_num]['player_ids']
                 best_lineup_detail = results_df[results_df['player_id'].isin(best_lineup_player_ids)][
                     ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'own_proj', 'actual_own']
