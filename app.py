@@ -690,21 +690,35 @@ def display_multiple_lineups(slate_df, template, lineup_list):
 
     st.markdown("---") 
 
-    st.subheader("📋 Top Lineups Summary")
+    st.subheader("📋 Lineup Summary with Edge Analysis")
     
     summary_data = []
     
     for i, lineup_data in enumerate(lineup_list):
         lineup_players_df = slate_df[slate_df['player_id'].isin(lineup_data['player_ids'])]
         
+        # Calculate edge metrics
+        total_ownership = lineup_players_df['own_proj'].sum()
+        avg_leverage = lineup_players_df['leverage_score'].mean()
+        avg_gpp_score = lineup_players_df['gpp_score'].mean()
+        
+        # Count edge distribution
+        edge_dist = lineup_players_df['edge_category'].value_counts()
+        elite_count = edge_dist.get('🔥 Elite Leverage', 0)
+        high_count = edge_dist.get('⭐ High Leverage', 0)
+        
         summary_row = {
             'Lineup': i + 1,
             'Projected': lineup_data['proj_score'],
-            'Salary Used': lineup_players_df['salary'].sum(),
-            'Games Used': lineup_players_df['GameID'].nunique()
+            'Total Own%': total_ownership,
+            'Avg Leverage': avg_leverage,
+            'GPP Score': avg_gpp_score,
+            'Elite Edge': elite_count,
+            'High Edge': high_count,
+            'Salary': lineup_players_df['salary'].sum()
         }
         
-        # Add actual score if available
+        # Add actual if available
         if has_actuals and 'actual_pts' in lineup_players_df.columns:
             if lineup_players_df['actual_pts'].notna().all():
                 actual_score = lineup_players_df['actual_pts'].sum()
@@ -715,9 +729,8 @@ def display_multiple_lineups(slate_df, template, lineup_list):
         
     summary_df = pd.DataFrame(summary_data).set_index('Lineup')
     
-    # Format based on whether we have actuals
+    # Sort by best metric
     if 'Actual' in summary_df.columns:
-        # Sort by actual score if available
         summary_df = summary_df.sort_values('Actual', ascending=False)
         summary_df['Rank'] = range(1, len(summary_df) + 1)
         
@@ -726,19 +739,32 @@ def display_multiple_lineups(slate_df, template, lineup_list):
                 "Projected": "{:.2f}",
                 "Actual": "{:.2f}",
                 "Diff": "{:+.2f}",
-                "Salary Used": "${:,}"
-            }),
+                "Total Own%": "{:.1f}%",
+                "Avg Leverage": "{:+.1f}",
+                "GPP Score": "{:.1f}",
+                "Salary": "${:,}"
+            }).background_gradient(subset=['Avg Leverage'], cmap='RdYlGn'),
             use_container_width=True
         )
         
-        # Show which lineup actually won
         best_actual_idx = summary_df['Actual'].idxmax()
-        st.success(f"🏆 **Lineup {best_actual_idx} actually scored the most**: {summary_df.loc[best_actual_idx, 'Actual']:.2f} points!")
+        st.success(f"🏆 **Lineup {best_actual_idx} won**: {summary_df.loc[best_actual_idx, 'Actual']:.2f} pts | Leverage: {summary_df.loc[best_actual_idx, 'Avg Leverage']:+.1f}")
     else:
+        # Highlight best leverage
         st.dataframe(
-            summary_df.style.format({"Projected": "{:.2f}", "Salary Used": "${:,}"}), 
+            summary_df.style.format({
+                "Projected": "{:.2f}",
+                "Total Own%": "{:.1f}%",
+                "Avg Leverage": "{:+.1f}",
+                "GPP Score": "{:.1f}",
+                "Salary": "${:,}"
+            }).background_gradient(subset=['Avg Leverage'], cmap='RdYlGn'),
             use_container_width=True
         )
+        
+        # Show best leverage lineup
+        best_lev_idx = summary_df['Avg Leverage'].idxmax()
+        st.info(f"💎 **Best Leverage**: Lineup {best_lev_idx} | Avg Leverage: {summary_df.loc[best_lev_idx, 'Avg Leverage']:+.1f} | Only {summary_df.loc[best_lev_idx, 'Total Own%']:.0f}% total ownership")
     
     st.subheader("🔎 Lineup Detail View")
     
@@ -1117,59 +1143,164 @@ def tab_lineup_builder(slate_df, template):
 
     st.markdown("---")
     
-    st.header("2. Find Optimal Lineups")
-    
-    recommended_n = tournament_config.get('recommended_lineups', 10)
-    
-    st.info(f"""
-    **💡 Recommendation for {tournament_type}:**
-    - Generate **{recommended_n}** lineup(s) for this tournament type
-    - Field size: ~{tournament_config.get('field_size', 10000):,} entries  
-    - {tournament_config.get('description', '')}
-    """)
+    st.header("3. Generate Lineups with Template")
     
     col_n, col_slack = st.columns(2)
     
     with col_n:
-        default_n = min(recommended_n, 20)
-        n_lineups = st.slider("Number of Lineups to Generate (N)", min_value=1, max_value=150, value=default_n, step=1, help=f"Recommended: {recommended_n} for {tournament_type}")
+        n_lineups = st.slider(
+            "Number of Lineups", 
+            min_value=1, 
+            max_value=20, 
+            value=min(selected_template['requirements']['min_leverage_plays'] * 2, 10),
+            help="More lineups = more template variations"
+        )
     
     with col_slack:
-        if contest_code == "CASH":
-            default_slack = 0
-        elif contest_code == "LARGE_GPP":
-            default_slack = 2
-        else:
-            default_slack = 1
-            
-        slack = st.slider("Ownership Target Slack (Flexibility)", min_value=0, max_value=4, value=default_slack, step=1, help="Higher slack allows more deviation from ownership targets.")
+        use_template_enforcement = st.checkbox(
+            "Enforce Template Requirements",
+            value=True,
+            help="Force lineups to match the selected template's edge distribution"
+        )
     
-    run_btn = st.button(f"✨ Generate Top {n_lineups} Lineups", use_container_width=True)
+    # Advanced settings
+    with st.expander("⚙️ Advanced Edge Settings"):
+        min_gpp_score = st.slider(
+            "Minimum GPP Score per Player",
+            min_value=0,
+            max_value=50,
+            value=20,
+            help="Only use players above this GPP score threshold"
+        )
+        
+        max_total_ownership = st.slider(
+            "Max Total Lineup Ownership %",
+            min_value=100,
+            max_value=400,
+            value=250,
+            step=10,
+            help="Lower = more contrarian. Average lineup = 250%"
+        )
+        
+        force_leverage_play = st.checkbox(
+            "Force at least 1 Elite Leverage play",
+            value=True,
+            help="Guarantee a 🔥 Elite Leverage player in every lineup"
+        )
+    
+    run_btn = st.button(f"🚀 Build {n_lineups} Lineups Using {selected_template['name']}", use_container_width=True, type="primary")
     
     if run_btn:
         final_df = st.session_state['edited_df'].copy()
-        final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
         
+        # Apply GPP score filter
+        if min_gpp_score > 0:
+            original_count = len(final_df)
+            final_df = final_df[final_df['gpp_score'] >= min_gpp_score]
+            filtered_count = original_count - len(final_df)
+            if filtered_count > 0:
+                st.info(f"🔍 Filtered out {filtered_count} low GPP score players")
+        
+        # Template enforcement - adjust bucket targets
+        if use_template_enforcement:
+            template_reqs = selected_template['requirements']
+            
+            # Count available players by edge category
+            edge_counts = final_df['edge_category'].value_counts()
+            
+            st.info(f"""
+            **Template Enforcement Active:**
+            - Targeting {template_reqs['min_leverage_plays']} leverage plays
+            - Max {template_reqs['max_chalk']} chalk players
+            - Requiring {template_reqs['required_punt']} punt play(s) <5% owned
+            """)
+            
+            # Check if we have enough players
+            elite_count = edge_counts.get('🔥 Elite Leverage', 0)
+            high_count = edge_counts.get('⭐ High Leverage', 0)
+            
+            if elite_count + high_count < template_reqs['min_leverage_plays']:
+                st.warning(f"⚠️ Only {elite_count + high_count} leverage plays available. Template requires {template_reqs['min_leverage_plays']}. Adjust GPP score filter.")
+        
+        # Build lineups with edge awareness
         conflict = set(locked_player_ids) & set(excluded_player_ids)
         if conflict:
-            st.error(f"❌ CONFLICT: Player(s) {', '.join(conflict)} are both locked and excluded.")
+            st.error(f"❌ CONFLICT: {', '.join(conflict)} are both locked and excluded.")
             return
 
-        with st.spinner(f'Calculating top {n_lineups} optimal lineups...'):
+        with st.spinner(f'Building {n_lineups} lineups using {selected_template["name"]}...'):
+            
+            # Generate lineups
             top_lineups = generate_top_n_lineups(
                 slate_df=final_df,
                 template=template,
                 n_lineups=n_lineups,
-                bucket_slack=slack,
-                locked_player_ids=locked_player_ids, 
-                excluded_player_ids=excluded_player_ids, 
+                bucket_slack=2,  # More flexibility for edge-based building
+                locked_player_ids=locked_player_ids,
+                excluded_player_ids=excluded_player_ids,
             )
+            
+            # Post-process: Filter lineups by template requirements
+            if use_template_enforcement and top_lineups:
+                valid_lineups = []
+                
+                for lineup in top_lineups:
+                    lineup_players = final_df[final_df['player_id'].isin(lineup['player_ids'])]
+                    
+                    # Check template requirements
+                    edge_dist = lineup_players['edge_category'].value_counts()
+                    total_own = lineup_players['own_proj'].sum()
+                    
+                    elite_lev = edge_dist.get('🔥 Elite Leverage', 0) + edge_dist.get('⭐ High Leverage', 0)
+                    chalk_count = len(lineup_players[lineup_players['own_proj'] > 30])
+                    punt_count = len(lineup_players[lineup_players['own_proj'] < 5])
+                    
+                    # Check all requirements
+                    meets_leverage = elite_lev >= template_reqs['min_leverage_plays']
+                    meets_chalk = chalk_count <= template_reqs['max_chalk']
+                    meets_punt = punt_count >= template_reqs['required_punt']
+                    meets_ownership = total_own <= max_total_ownership
+                    
+                    if force_leverage_play:
+                        has_elite = edge_dist.get('🔥 Elite Leverage', 0) >= 1
+                        meets_template = meets_leverage and meets_chalk and meets_punt and meets_ownership and has_elite
+                    else:
+                        meets_template = meets_leverage and meets_chalk and meets_punt and meets_ownership
+                    
+                    if meets_template:
+                        # Add template metadata
+                        lineup['template_score'] = (
+                            elite_lev * 10 + 
+                            (max_total_ownership - total_own) / 10 +
+                            punt_count * 5
+                        )
+                        lineup['total_ownership'] = total_own
+                        lineup['edge_distribution'] = dict(edge_dist)
+                        valid_lineups.append(lineup)
+                
+                if len(valid_lineups) < n_lineups:
+                    st.warning(f"⚠️ Only {len(valid_lineups)} of {n_lineups} lineups met template requirements. Consider loosening constraints.")
+                
+                top_lineups = valid_lineups[:n_lineups]
         
-        st.session_state['optimal_lineups_results'] = {'lineups': top_lineups, 'ran': True}
-        st.success(f"✅ Optimization complete! Found {len(top_lineups)} unique lineups.")
-
+        if top_lineups:
+            st.session_state['optimal_lineups_results'] = {'lineups': top_lineups, 'ran': True}
+            st.success(f"✅ Built {len(top_lineups)} template-optimized lineups!")
+            
+            # Show template compliance summary
+            if use_template_enforcement:
+                st.markdown("**Template Compliance Summary:**")
+                for i, lineup in enumerate(top_lineups[:3]):
+                    with st.expander(f"Lineup {i+1} - Edge Distribution"):
+                        edge_dist = lineup.get('edge_distribution', {})
+                        st.write(f"Total Ownership: {lineup.get('total_ownership', 0):.1f}%")
+                        st.write(f"Template Score: {lineup.get('template_score', 0):.1f}")
+                        st.write("Edge Distribution:", edge_dist)
+        else:
+            st.error("❌ No lineups could be built meeting template requirements. Try adjusting settings.")
+    
     st.markdown("---")
-    st.header(f"3. Top {n_lineups} Lineups")
+    st.header(f"4. Your Lineups")
     
     if st.session_state['optimal_lineups_results'].get('ran', False):
         display_multiple_lineups(slate_df, template, st.session_state['optimal_lineups_results']['lineups'])
