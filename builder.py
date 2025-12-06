@@ -257,17 +257,19 @@ def run_monte_carlo_simulations(
     # 2. RUN SIMULATIONS
     for i in range(num_iterations):
         
-        # 🛑 REINFORCED FIX for RecursionError/NumPy array instability:
-        # Explicitly cast to float to ensure NumPy passes stable types to the underlying C-API.
+        # REINFORCED STABILITY: Explicitly cast to float for NumPy and use .values.
         loc_values = sim_df['proj'].values.astype(float)
         scale_values = sim_df['std_dev'].values.astype(float)
         
         # Sample new projections N(mu, sigma)
-        sim_df['sampled_proj'] = np.random.normal(
+        sampled_values = np.random.normal(
             loc=loc_values, 
             scale=scale_values,
             size=len(sim_df)
-        ).clip(lower=0.1)
+        )
+        
+        # 🛑 FINAL FIX: Apply the clip operation separately to prevent the C recursion crash
+        sim_df['sampled_proj'] = sampled_values.clip(lower=0.1)
         
         # Create a temporary DF with sampled proj as the primary 'proj' column
         temp_df = sim_df.rename(columns={'sampled_proj': 'proj'})
