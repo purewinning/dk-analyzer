@@ -307,7 +307,7 @@ def tab_lineup_builder(slate_df, template):
     df_for_editor = slate_df.copy()
     
     if df_for_editor.empty:
-        st.info("✍️ Paste your player data into the text area in the sidebar and click the button to load the pool.")
+        st.info("✏️ Paste your player data into the text area in the sidebar and click the button to load the pool.")
         
         blank_df = pd.DataFrame(columns=column_order)
         edited_df = st.data_editor(
@@ -412,7 +412,7 @@ def tab_contest_analyzer(slate_df, template):
     st.header("Contest Strategy Analyzer")
     
     if slate_df.empty:
-        st.info("✍️ Paste your data into the sidebar text area to view the contest analyzer.")
+        st.info("✏️ Paste your data into the sidebar text area to view the contest analyzer.")
         return
 
     st.info(f"Analysis based on: **{template.contest_label}**")
@@ -453,5 +453,49 @@ if __name__ == '__main__':
         st.divider()
         st.subheader("Paste Player Pool Data (CSV Format)")
         
+        # FIXED: Complete text_area with proper closing
         pasted_csv_data = st.text_area(
-            "Copy your player pool data (including headers) and paste it
+            "Copy your player pool data (including headers) and paste it here:",
+            height=200,
+            placeholder="Player,Salary,Position,Team,Opponent,PROJECTED FP,OWNERSHIP %\nLeBron James,9500,SF/PF,LAL,GSW,45.2,32.5"
+        )
+        
+        load_data_btn = st.button("Load Pasted Data", use_container_width=True)
+        
+        if load_data_btn:
+            if pasted_csv_data and pasted_csv_data.strip():
+                with st.spinner("Processing your data..."):
+                    loaded_df = load_and_preprocess_data(pasted_csv_data)
+                    st.session_state['slate_df'] = loaded_df
+                    
+                    if not loaded_df.empty:
+                        st.success(f"✅ Loaded {len(loaded_df)} players successfully!")
+                    else:
+                        st.error("❌ Failed to load data. Check the format and try again.")
+            else:
+                st.warning("⚠️ Please paste some data first!")
+    
+    # Initialize slate_df from session state
+    if 'slate_df' not in st.session_state:
+        st.session_state['slate_df'] = pd.DataFrame(columns=CORE_INTERNAL_COLS + ['player_id', 'GameID', 'bucket', 'value', 'Lock', 'Exclude'])
+    
+    slate_df = st.session_state['slate_df']
+    
+    # Build template
+    template = build_template_from_params(
+        contest_type=contest_code,
+        field_size=1000,
+        pct_to_first=1.0,
+        roster_size=DEFAULT_ROSTER_SIZE,
+        salary_cap=DEFAULT_SALARY_CAP,
+        min_games=MIN_GAMES_REQUIRED
+    )
+    
+    # Main tabs
+    tab1, tab2 = st.tabs(["🏗️ Lineup Builder", "📊 Contest Analyzer"])
+    
+    with tab1:
+        tab_lineup_builder(slate_df, template)
+    
+    with tab2:
+        tab_contest_analyzer(slate_df, template)
