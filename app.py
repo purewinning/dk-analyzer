@@ -27,12 +27,17 @@ REQUIRED_CSV_TO_INTERNAL_MAP = {
     'Position': 'positions',
     'Team': 'Team',
     'Opponent': 'Opponent',
-    'PROJECTED FP': 'proj',      
-    'OWNERSHIP %': 'own_proj',   
     
-    # Fallback for common one-word headers
+    # Primary projection headers
+    'PROJECTED FP': 'proj',
     'Projection': 'proj',
+    'Proj': 'proj',
+    
+    # Primary ownership headers
+    'OWNERSHIP %': 'own_proj',
     'Ownership': 'own_proj',
+    'Own': 'own_proj',
+    'Own%': 'own_proj',
     
     # Other supporting columns
     'Minutes': 'Minutes',
@@ -72,10 +77,11 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
         final_missing_internal = [name for name in required_internal if name not in mapped_internal_names]
 
         if final_missing_internal:
-            missing_csv_names = [k for k, v in REQUIRED_CSV_TO_INTERNAL_MAP.items() if v in final_missing_internal and k in ['Player', 'Salary', 'Position', 'Team', 'Opponent', 'PROJECTED FP', 'OWNERSHIP %']]
-            
-            st.error(f"Missing essential headers: The following columns are missing or incorrectly named: {', '.join(set(missing_csv_names))}.")
-            st.error("Please ensure your pasted data's first row (headers) exactly matches: Player, Salary, Position, Team, Opponent, PROJECTED FP, OWNERSHIP %.")
+            st.error("❌ Missing essential columns. Please ensure your CSV has these required headers:")
+            st.error("**Required:** Player, Salary, Position, Team, Opponent")
+            st.error("**Projection column:** One of: 'Projection', 'PROJECTED FP', or 'Proj'")
+            st.error("**Ownership column:** One of: 'Ownership', 'OWNERSHIP %', 'Own', or 'Own%'")
+            st.error(f"**Missing:** {', '.join(final_missing_internal)}")
             return pd.DataFrame(columns=empty_df_cols)
 
         df.rename(columns=actual_map, inplace=True)
@@ -457,7 +463,7 @@ if __name__ == '__main__':
         pasted_csv_data = st.text_area(
             "Copy your player pool data (including headers) and paste it here:",
             height=200,
-            placeholder="Player,Salary,Position,Team,Opponent,PROJECTED FP,OWNERSHIP %\nLeBron James,9500,SF/PF,LAL,GSW,45.2,32.5"
+            placeholder="Player,Salary,Position,Team,Opponent,Minutes,FPPM,Projection,Value,Ownership\nLeBron James,9500,SF/PF,LAL,GSW,35.2,1.28,45.2,4.76,32.5"
         )
         
         load_data_btn = st.button("Load Pasted Data", use_container_width=True)
