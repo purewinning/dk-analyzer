@@ -16,9 +16,7 @@ from builder import (
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
 
-# --- HEADER MAPPING (UPDATED FOR YOUR CSV) ---
-# Maps your input CSV headers to the internal names used by the script.
-# **THIS SECTION HAS BEEN UPDATED**
+# --- HEADER MAPPING ---
 REQUIRED_CSV_TO_INTERNAL_MAP = {
     'Salary': 'salary',
     'Position': 'positions',
@@ -67,7 +65,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             )
             
             # --- CLEANUP & STANDARDIZE ---
-            # Set player_id from the 'Name' column
             df['player_id'] = df['Name'] 
             
             # Clean Ownership (Handle commas, %, convert to numeric)
@@ -125,7 +122,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
         df = pd.DataFrame(data)
         st.warning("⚠️ Using placeholder data. Upload your CSV for real analysis.")
 
-    # Assign Buckets 
+    # Assign Buckets (This is where the 'bucket' column is created)
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
     
     # --- CALCULATE VALUE (Re-calculate if column was missing or for consistency) ---
@@ -199,12 +196,11 @@ def display_multiple_lineups(slate_df, lineup_list):
     lineup_df.sort_values(by='roster_position', inplace=True)
     
     # 3. Define display columns
-    # **UPDATED DISPLAY COLUMNS**
-    display_cols = ['roster_position', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM', 'bucket'] 
+    display_cols = ['roster_position', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
     lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
     
     # 4. Rename the column for display
-    lineup_df_display.rename(columns={'roster_position': 'SLOT', 'positions': 'POS', 'own_proj': 'OWN%', 'Minutes': 'MIN', 'FPPM': 'FP/M'}, inplace=True)
+    lineup_df_display.rename(columns={'roster_position': 'SLOT', 'positions': 'POS', 'own_proj': 'OWN%', 'Minutes': 'MIN', 'FPPM': 'FP/M', 'bucket': 'CATEGORY'}, inplace=True)
     
     # Display the detailed lineup
     st.dataframe(
@@ -221,9 +217,10 @@ def tab_lineup_builder(slate_df, template):
     # --- A. PLAYER POOL EDITOR ---
     st.markdown("Use the table to **Lock** or **Exclude** players for the optimal lineup.")
     
-    # **UPDATED COLUMN CONFIGURATION**
+    # **UPDATED COLUMN CONFIGURATION to include 'bucket'**
     column_config = {
         "Name": st.column_config.TextColumn("Player", disabled=True), 
+        "bucket": st.column_config.TextColumn("Category", disabled=True, help="punt (<10%), mid (10-30%), chalk (30-40%), mega (>40%)", width="small"),
         "positions": st.column_config.TextColumn("Pos", disabled=True), 
         "Team": st.column_config.TextColumn("Team", disabled=True, width="small"), 
         "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
@@ -235,17 +232,17 @@ def tab_lineup_builder(slate_df, template):
         "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
         "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup", width="small"), 
         "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup", width="small"), 
-        "player_id": None, "GameID": None, "bucket": None
+        "player_id": None, "GameID": None 
     }
     
-    # **UPDATED COLUMN ORDER**
+    # **UPDATED COLUMN ORDER to include 'bucket'**
     column_order = [
-        'Lock', 'Exclude', 'Name', 'positions', 'Team', 'Opponent', 
+        'Lock', 'Exclude', 'Name', 'bucket', 'positions', 'Team', 'Opponent', 
         'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM'
     ]
     
     # The dataframe passed to data_editor must contain all keys in column_order
-    df_for_editor = slate_df[column_order + ['player_id', 'GameID', 'bucket']].copy()
+    df_for_editor = slate_df[column_order + ['player_id', 'GameID']].copy()
 
     edited_df = st.data_editor(
         df_for_editor, 
