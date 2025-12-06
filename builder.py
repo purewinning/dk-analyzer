@@ -182,4 +182,40 @@ def build_optimal_lineup(
     pos_map = template.pos_req
     
     pg_players = playable_df[playable_df['positions'].str.contains('PG')]['player_id'].tolist()
-    sg_players = playable_df[playable_
+    sg_players = playable_df[playable_df['positions'].str.contains('SG')]['player_id'].tolist()
+    sf_players = playable_df[playable_df['positions'].str.contains('SF')]['player_id'].tolist()
+    pf_players = playable_df[playable_df['positions'].str.contains('PF')]['player_id'].tolist()
+    c_players = playable_df[playable_df['positions'].str.contains('C')]['player_id'].tolist()
+
+    # Hard Slot Requirements
+    prob += lpSum(player_vars[pid] for pid in pg_players) >= pos_map['PG'], "PG Min"
+    prob += lpSum(player_vars[pid] for pid in sg_players) >= pos_map['SG'], "SG Min"
+    prob += lpSum(player_vars[pid] for pid in sf_players) >= pos_map['SF'], "SF Min"
+    prob += lpSum(player_vars[pid] for pid in pf_players) >= pos_map['PF'], "PF Min"
+    prob += lpSum(player_vars[pid] for pid in c_players) >= pos_map['C'], "C Min"
+    
+    # Flexible Slots (G & F)
+    prob += lpSum(player_vars[pid] for pid in set(pg_players) | set(sg_players)) >= (pos_map['PG'] + pos_map['SG'] + pos_map['G']), "G Slot Fulfillment"
+    prob += lpSum(player_vars[pid] for pid in set(sf_players) | set(pf_players)) >= (pos_map['SF'] + pos_map['PF'] + pos_map['F']), "F Slot Fulfillment"
+    
+    # E. Lock/Exclude Constraints
+    for pid in locked_player_ids:
+        if pid in player_vars:
+            prob += player_vars[pid] == 1, f"Lock Player {pid}"
+        
+    # 5. Solve the Problem
+    prob.solve()
+    
+    # 6. Process Results
+    if prob.status == LpStatusOptimal:
+        selected_players = [pid for pid in playable_df['player_id'] if player_vars[pid].varValue == 1]
+        
+        final_penalty = value(penalty_sum)
+        
+        if final_penalty > 0.0:
+            print(f"⚠️ Optimal lineup found, but incurred a template penalty of {final_penalty / 500:.0f} violation(s) to maximize projection.")
+            
+        return slate_df[slate_df['player_id'].isin(selected_players)]
+    else:
+        print("❌ CRITICAL FAILURE: Could not find a valid lineup. Check hard constraints (Salary Cap, Roster Size, Positional Minimums, Min Games).")
+        return None
