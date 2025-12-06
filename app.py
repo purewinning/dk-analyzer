@@ -18,12 +18,18 @@ MIN_GAMES_REQUIRED = 2
 
 # --- HEADER MAPPING (UPDATED FOR YOUR CSV) ---
 # Maps your input CSV headers to the internal names used by the script.
+# **THIS SECTION HAS BEEN UPDATED**
 REQUIRED_CSV_TO_INTERNAL_MAP = {
     'Salary': 'salary',
     'Position': 'positions',
     'Projection': 'proj',
     'Ownership': 'own_proj',
-    'Player': 'Name' 
+    'Player': 'Name',
+    'Team': 'Team',
+    'Opponent': 'Opponent',
+    'Minutes': 'Minutes',
+    'FPPM': 'FPPM',
+    'Value': 'Value'
 }
 
 
@@ -34,33 +40,31 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     
     df = pd.DataFrame()
     
+    # Required columns that must be in the final, internal dataframe
+    CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name']
+    
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
             st.success("✅ Data loaded successfully.")
             
-            # Check for required columns based on the new mapping
-            missing_csv_cols = [col for col in REQUIRED_CSV_TO_INTERNAL_MAP.keys() if col not in df.columns]
+            # --- VALIDATE REQUIRED COLUMNS ---
+            required_csv_cols = ['Salary', 'Position', 'Projection', 'Ownership', 'Player', 'Team', 'Opponent']
+            missing_csv_cols = [col for col in required_csv_cols if col not in df.columns]
+            
             if missing_csv_cols:
-                st.error(f"Missing headers: {missing_csv_cols}. Required: {list(REQUIRED_CSV_TO_INTERNAL_MAP.keys())}")
+                st.error(f"Missing essential headers: **{', '.join(missing_csv_cols)}**. Please ensure your CSV contains: {', '.join(required_csv_cols)}.")
                 return pd.DataFrame()
             
-            # Rename columns using the new mapping
+            # Rename columns using the mapping
             df.rename(columns=REQUIRED_CSV_TO_INTERNAL_MAP, inplace=True)
             
-            # Create GameID (Requires Team and Opponent columns)
-            required_game_cols = ['Team', 'Opponent']
-            if 'GameID' not in df.columns:
-                if all(col in df.columns for col in required_game_cols):
-                    # Ensure columns are treated as strings before joining
-                    df['Team'] = df['Team'].astype(str)
-                    df['Opponent'] = df['Opponent'].astype(str)
-                    df['GameID'] = df.apply(
-                        lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1
-                    )
-                else:
-                    st.error("Missing required columns: **Team** and **Opponent** (These are often derived but needed for GameID).")
-                    return pd.DataFrame()
+            # --- CREATE GameID ---
+            df['Team'] = df['Team'].astype(str)
+            df['Opponent'] = df['Opponent'].astype(str)
+            df['GameID'] = df.apply(
+                lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1
+            )
             
             # --- CLEANUP & STANDARDIZE ---
             # Set player_id from the 'Name' column
@@ -69,7 +73,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             # Clean Ownership (Handle commas, %, convert to numeric)
             df['own_proj'] = df['own_proj'].astype(str).str.replace('%', '', regex=False).str.replace(',', '.', regex=False)
             df['own_proj'] = pd.to_numeric(df['own_proj'], errors='coerce')
-            df.dropna(subset=['own_proj', 'proj', 'salary'], inplace=True)
+            df.dropna(subset=CORE_INTERNAL_COLS, inplace=True)
 
             # Standardize Ownership to 0-100 Scale (Whole Numbers)
             if df['own_proj'].max() <= 1.0 and df['own_proj'].max() > 0:
@@ -79,13 +83,18 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
 
             # Final type conversions
             try:
-                # Cleaning salary again ensures no non-numeric strings remain
+                # Cleaning salary
                 df['salary'] = df['salary'].astype(str).str.strip().str.replace('$', '', regex=False).str.replace(',', '', regex=False)
                 df['salary'] = pd.to_numeric(df['salary'], errors='coerce').astype('Int64') 
                 df.dropna(subset=['salary'], inplace=True)
 
                 df['salary'] = df['salary'].astype(int) 
                 df['proj'] = df['proj'].astype(float)
+                # Ensure other numeric fields are float/int
+                for col in ['Minutes', 'FPPM', 'Value']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce').astype(float).round(2)
+
             except Exception as e:
                 st.error(f"Failed final conversion (Salary/Projection): {e}")
                 return pd.DataFrame()
@@ -108,7 +117,10 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             'own_proj': [45.0, 35.0, 15.0, 28.0, 5.0, 8.0, 40.0, 12.0, 20.0, 9.0, 33.0, 18.0, 4.0, 16.0], 
             'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
             'Opponent': ['BOS', 'BOS', 'LAL', 'LAL', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'BOS', 'LAL', 'DEN', 'MIL'],
-            'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
+            'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4],
+            'Minutes': [30.0, 34.0, 28.0, 35.0, 20.0, 18.0, 36.0, 25.0, 32.0, 15.0, 33.0, 37.0, 22.0, 29.0],
+            'FPPM': [1.18, 1.18, 1.07, 1.31, 1.25, 1.23, 1.40, 1.31, 1.19, 1.40, 1.27, 1.30, 1.27, 1.07],
+            'Value': [5.92, 5.74, 6.02, 5.73, 5.56, 5.53, 5.59, 5.95, 5.85, 4.98, 5.60, 5.65, 5.83, 5.96]
         }
         df = pd.DataFrame(data)
         st.warning("⚠️ Using placeholder data. Upload your CSV for real analysis.")
@@ -116,7 +128,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     # Assign Buckets 
     df['bucket'] = df['own_proj'].apply(ownership_bucket)
     
-    # --- CALCULATE VALUE ---
+    # --- CALCULATE VALUE (Re-calculate if column was missing or for consistency) ---
     df['value'] = np.where(df['salary'] > 0, (df['proj'] / (df['salary'] / 1000)).round(2), 0.0)
 
     # Initialize UI Control Columns
@@ -187,15 +199,16 @@ def display_multiple_lineups(slate_df, lineup_list):
     lineup_df.sort_values(by='roster_position', inplace=True)
     
     # 3. Define display columns
-    display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'value', 'own_proj', 'bucket'] 
+    # **UPDATED DISPLAY COLUMNS**
+    display_cols = ['roster_position', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM', 'bucket'] 
     lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
     
     # 4. Rename the column for display
-    lineup_df_display.rename(columns={'roster_position': 'SLOT'}, inplace=True)
+    lineup_df_display.rename(columns={'roster_position': 'SLOT', 'positions': 'POS', 'own_proj': 'OWN%', 'Minutes': 'MIN', 'FPPM': 'FP/M'}, inplace=True)
     
     # Display the detailed lineup
     st.dataframe(
-        lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "value": "{:.2f}", "own_proj": "{:.1f}%"}), 
+        lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "value": "{:.2f}", "OWN%": "{:.1f}%", "MIN": "{:.1f}", "FP/M": "{:.2f}"}), 
         use_container_width=True,
         hide_index=True 
     )
@@ -208,26 +221,34 @@ def tab_lineup_builder(slate_df, template):
     # --- A. PLAYER POOL EDITOR ---
     st.markdown("Use the table to **Lock** or **Exclude** players for the optimal lineup.")
     
+    # **UPDATED COLUMN CONFIGURATION**
     column_config = {
-        "Name": st.column_config.TextColumn("Player Name", disabled=True), 
+        "Name": st.column_config.TextColumn("Player", disabled=True), 
         "positions": st.column_config.TextColumn("Pos", disabled=True), 
-        "salary": st.column_config.NumberColumn("Salary", format="$%d"), 
-        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), 
-        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True), 
-        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), 
-        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), 
-        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), 
-        "player_id": None, "GameID": None, "Team": None, "Opponent": None
+        "Team": st.column_config.TextColumn("Team", disabled=True, width="small"), 
+        "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
+        "salary": st.column_config.NumberColumn("Salary", format="$%d", width="small"), 
+        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f", width="small"), 
+        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), 
+        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f%%", width="small"),
+        "Minutes": st.column_config.NumberColumn("Min", format="%.1f", width="small"),
+        "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
+        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup", width="small"), 
+        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup", width="small"), 
+        "player_id": None, "GameID": None, "bucket": None
     }
     
+    # **UPDATED COLUMN ORDER**
     column_order = [
-        'Lock', 'Exclude', 'Name', 'positions', 'salary', 
-        'proj', 'value', 'own_proj', 
-        'Team', 'Opponent', 
+        'Lock', 'Exclude', 'Name', 'positions', 'Team', 'Opponent', 
+        'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM'
     ]
     
+    # The dataframe passed to data_editor must contain all keys in column_order
+    df_for_editor = slate_df[column_order + ['player_id', 'GameID', 'bucket']].copy()
+
     edited_df = st.data_editor(
-        slate_df[column_order + ['player_id', 'GameID']], 
+        df_for_editor, 
         column_config=column_config,
         column_order=column_order, 
         hide_index=True,
