@@ -16,255 +16,9 @@ from builder import (
 
 # --- STREAMLIT CONFIGURATION (MUST BE FIRST) ---
 st.set_page_config(layout="wide", page_title="🏀 DK Lineup Optimizer")
-# ---------------------------------------------
 
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
-
-# --- TOURNAMENT SIMULATOR CLASS ---
-class TournamentSimulator:
-    """
-    Simulates DFS tournaments to analyze lineup construction patterns and win probability.
-    """
-    
-    def __init__(self, slate_df: pd.DataFrame, field_size: int = 10000):
-        """
-        Initialize simulator with player pool data.
-        
-        Args:
-            slate_df: DataFrame with player data (proj, own_proj, salary, etc.)
-            field_size: Number of entries in the tournament
-        """
-        self.slate_df = slate_df.copy()
-        self.field_size = field_size
-        
-        # Calculate player variance (std dev) based on projection
-        # Higher projection = higher variance (stars are more volatile)
-        self.slate_df['std_dev'] = self.slate_df['proj'] * 0.25  # 25% std dev
-        
-    def simulate_player_score(self, player_row, n_simulations=1):
-        """
-        Simulate actual fantasy scores for a player using normal distribution.
-        
-        Args:
-            player_row: Row from slate_df with player data
-            n_simulations: Number of simulations to run
-            
-        Returns:
-            Array of simulated scores
-        """
-        return np.random.normal(
-            loc=player_row['proj'],
-            scale=player_row['std_dev'],
-            size=n_simulations
-        ).clip(min=0)  # Can't score negative points
-    
-    def simulate_lineup_score(self, player_ids: List[str], n_simulations=1000):
-        """
-        Simulate a lineup's score distribution across many contests.
-        
-        Args:
-            player_ids: List of player IDs in the lineup
-            n_simulations: Number of simulations to run
-            
-        Returns:
-            Array of simulated total scores for the lineup
-        """
-        lineup_players = self.slate_df[self.slate_df['player_id'].isin(player_ids)]
-        
-        # Simulate each player's scores
-        simulated_scores = np.zeros(n_simulations)
-        
-        for _, player in lineup_players.iterrows():
-            player_sims = self.simulate_player_score(player, n_simulations)
-            simulated_scores += player_sims
-            
-        return simulated_scores
-    
-    def generate_field_ownership(self):
-        """
-        Generate a tournament field with ownership-based lineup distribution.
-        Returns distribution of how many lineups used each player.
-        """
-        field_usage = {}
-        
-        for _, player in self.slate_df.iterrows():
-            # Number of lineups using this player (based on ownership %)
-            n_lineups_with_player = int(self.field_size * (player['own_proj'] / 100))
-            field_usage[player['player_id']] = n_lineups_with_player
-            
-        return field_usage
-    
-    def calculate_win_probability(
-        self, 
-        lineup_player_ids: List[str],
-        n_simulations: int = 1000
-    ) -> Dict[str, float]:
-        """
-        Calculate probability of winning/placing based on simulations.
-        
-        Args:
-            lineup_player_ids: List of player IDs in your lineup
-            n_simulations: Number of tournament simulations to run
-            
-        Returns:
-            Dictionary with win rates for different placements
-        """
-        # Get your lineup's simulated scores
-        your_scores = self.simulate_lineup_score(lineup_player_ids, n_simulations)
-        
-        # Generate field ownership
-        field_usage = self.generate_field_ownership()
-        
-        # Calculate ownership leverage (how unique is your lineup?)
-        your_players = set(lineup_player_ids)
-        total_field_exposure = sum(field_usage.get(pid, 0) for pid in lineup_player_ids)
-        avg_exposure = total_field_exposure / (len(lineup_player_ids) * self.field_size)
-        
-        # Simulate winning scores (top 1% of field needs to beat)
-        # Assuming field scores are normally distributed around average projection
-        avg_field_projection = self.slate_df.nsmallest(8, 'salary')['proj'].sum()
-        field_std = avg_field_projection * 0.15
-        
-        winning_scores = np.random.normal(
-            loc=avg_field_projection * 1.3,  # Winners score 30% above average
-            scale=field_std,
-            size=n_simulations
-        )
-        
-        top10_scores = np.random.normal(
-            loc=avg_field_projection * 1.15,  # Top 10% scores 15% above average
-            scale=field_std,
-            size=n_simulations
-        )
-        
-        # Calculate win probabilities
-        win_rate = np.mean(your_scores > winning_scores)
-        top10_rate = np.mean(your_scores > top10_scores)
-        
-        return {
-            'win_rate': win_rate * 100,
-            'top10_rate': top10_rate * 100,
-            'avg_score': np.mean(your_scores),
-            'ceiling': np.percentile(your_scores, 90),
-            'floor': np.percentile(your_scores, 10),
-            'ownership_leverage': (1 - avg_exposure) * 100,
-            'leverage_score': win_rate * (1 - avg_exposure) * 1000
-        }
-    
-    def analyze_ownership_pattern(
-        self,
-        lineup_player_ids: List[str]
-    ) -> Dict[str, any]:
-        """
-        Analyze the ownership construction pattern of a lineup.
-        
-        Returns breakdown by ownership bucket and strategic insights.
-        """
-        lineup_players = self.slate_df[self.slate_df['player_id'].isin(lineup_player_ids)]
-        
-        # Count players in each bucket
-        bucket_counts = lineup_players['bucket'].value_counts().to_dict()
-        
-        # Calculate weighted ownership
-        avg_ownership = lineup_players['own_proj'].mean()
-        
-        # Calculate leverage (uniqueness)
-        leverage_score = 0
-        for _, player in lineup_players.iterrows():
-            # Lower ownership = higher leverage
-            player_leverage = (100 - player['own_proj']) / 100
-            leverage_score += player_leverage
-        leverage_score = leverage_score / len(lineup_players)
-        
-        return {
-            'mega_chalk_count': bucket_counts.get('mega', 0),
-            'chalk_count': bucket_counts.get('chalk', 0),
-            'mid_count': bucket_counts.get('mid', 0),
-            'punt_count': bucket_counts.get('punt', 0),
-            'avg_ownership': avg_ownership,
-            'leverage_score': leverage_score * 100,
-            'strategy': self._classify_strategy(bucket_counts, avg_ownership)
-        }
-    
-    def _classify_strategy(self, bucket_counts, avg_ownership):
-        """Classify lineup strategy based on construction."""
-        mega = bucket_counts.get('mega', 0)
-        chalk = bucket_counts.get('chalk', 0)
-        
-        if mega >= 2 or chalk >= 4:
-            return "Chalk Heavy"
-        elif bucket_counts.get('punt', 0) >= 3:
-            return "Contrarian Punt"
-        elif avg_ownership < 20:
-            return "Full Contrarian"
-        else:
-            return "Balanced"
-    
-    def compare_strategies(
-        self,
-        lineups_dict: Dict[str, List[str]],
-        n_simulations: int = 1000
-    ) -> pd.DataFrame:
-        """
-        Compare multiple lineup strategies side-by-side.
-        
-        Args:
-            lineups_dict: Dict of {lineup_name: [player_ids]}
-            n_simulations: Number of simulations per lineup
-            
-        Returns:
-            DataFrame comparing all strategies
-        """
-        results = []
-        
-        for name, player_ids in lineups_dict.items():
-            win_prob = self.calculate_win_probability(player_ids, n_simulations)
-            ownership = self.analyze_ownership_pattern(player_ids)
-            
-            results.append({
-                'Lineup': name,
-                'Strategy': ownership['strategy'],
-                'Win Rate %': win_prob['win_rate'],
-                'Top 10% Rate': win_prob['top10_rate'],
-                'Avg Score': win_prob['avg_score'],
-                'Ceiling (90th)': win_prob['ceiling'],
-                'Floor (10th)': win_prob['floor'],
-                'Avg Own %': ownership['avg_ownership'],
-                'Leverage Score': win_prob['leverage_score'],
-                'Mega Chalk': ownership['mega_chalk_count'],
-                'Chalk': ownership['chalk_count'],
-                'Mid': ownership['mid_count'],
-                'Punt': ownership['punt_count']
-            })
-        
-        return pd.DataFrame(results)
-
-# --- HEADER MAPPING ---
-REQUIRED_CSV_TO_INTERNAL_MAP = {
-    'Player': 'Name',
-    'Salary': 'salary', 
-    'Position': 'positions',
-    'Team': 'Team',
-    'Opponent': 'Opponent',
-    
-    # Primary projection headers
-    'PROJECTED FP': 'proj',
-    'Projection': 'proj',
-    'Proj': 'proj',
-    
-    # Primary ownership headers
-    'OWNERSHIP %': 'own_proj',
-    'Ownership': 'own_proj',
-    'Own': 'own_proj',
-    'Own%': 'own_proj',
-    
-    # Other supporting columns
-    'Minutes': 'Minutes',
-    'FPPM': 'FPPM',
-    'Value': 'Value'
-}
-CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name', 'Team', 'Opponent']
 
 # --- TOURNAMENT TEMPLATES ---
 TOURNAMENT_OWNERSHIP_TEMPLATES = {
@@ -330,33 +84,160 @@ TOURNAMENT_OWNERSHIP_TEMPLATES = {
     }
 }
 
-# --- 1. DATA PREPARATION ---
+# --- HEADER MAPPING ---
+REQUIRED_CSV_TO_INTERNAL_MAP = {
+    'Player': 'Name',
+    'Salary': 'salary', 
+    'Position': 'positions',
+    'Team': 'Team',
+    'Opponent': 'Opponent',
+    'PROJECTED FP': 'proj',
+    'Projection': 'proj',
+    'Proj': 'proj',
+    'OWNERSHIP %': 'own_proj',
+    'Ownership': 'own_proj',
+    'Own': 'own_proj',
+    'Own%': 'own_proj',
+    'Minutes': 'Minutes',
+    'FPPM': 'FPPM',
+    'Value': 'Value'
+}
+CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name', 'Team', 'Opponent']
 
-def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
-    """Loads CSV/TSV from a pasted string, standardizes ownership, and processes data."""
+# --- TOURNAMENT SIMULATOR CLASS ---
+class TournamentSimulator:
+    def __init__(self, slate_df: pd.DataFrame, field_size: int = 10000):
+        self.slate_df = slate_df.copy()
+        self.field_size = field_size
+        self.slate_df['std_dev'] = self.slate_df['proj'] * 0.25
+        
+    def simulate_player_score(self, player_row, n_simulations=1):
+        return np.random.normal(
+            loc=player_row['proj'],
+            scale=player_row['std_dev'],
+            size=n_simulations
+        ).clip(min=0)
     
-    # Initialization for empty/none data
+    def simulate_lineup_score(self, player_ids: List[str], n_simulations=1000):
+        lineup_players = self.slate_df[self.slate_df['player_id'].isin(player_ids)]
+        simulated_scores = np.zeros(n_simulations)
+        
+        for _, player in lineup_players.iterrows():
+            player_sims = self.simulate_player_score(player, n_simulations)
+            simulated_scores += player_sims
+            
+        return simulated_scores
+    
+    def generate_field_ownership(self):
+        field_usage = {}
+        for _, player in self.slate_df.iterrows():
+            n_lineups_with_player = int(self.field_size * (player['own_proj'] / 100))
+            field_usage[player['player_id']] = n_lineups_with_player
+        return field_usage
+    
+    def calculate_win_probability(self, lineup_player_ids: List[str], n_simulations: int = 1000) -> Dict[str, float]:
+        your_scores = self.simulate_lineup_score(lineup_player_ids, n_simulations)
+        field_usage = self.generate_field_ownership()
+        
+        total_field_exposure = sum(field_usage.get(pid, 0) for pid in lineup_player_ids)
+        avg_exposure = total_field_exposure / (len(lineup_player_ids) * self.field_size)
+        
+        avg_field_projection = self.slate_df.nsmallest(8, 'salary')['proj'].sum()
+        field_std = avg_field_projection * 0.15
+        
+        winning_scores = np.random.normal(loc=avg_field_projection * 1.3, scale=field_std, size=n_simulations)
+        top10_scores = np.random.normal(loc=avg_field_projection * 1.15, scale=field_std, size=n_simulations)
+        
+        win_rate = np.mean(your_scores > winning_scores)
+        top10_rate = np.mean(your_scores > top10_scores)
+        
+        return {
+            'win_rate': win_rate * 100,
+            'top10_rate': top10_rate * 100,
+            'avg_score': np.mean(your_scores),
+            'ceiling': np.percentile(your_scores, 90),
+            'floor': np.percentile(your_scores, 10),
+            'ownership_leverage': (1 - avg_exposure) * 100,
+            'leverage_score': win_rate * (1 - avg_exposure) * 1000
+        }
+    
+    def analyze_ownership_pattern(self, lineup_player_ids: List[str]) -> Dict[str, any]:
+        lineup_players = self.slate_df[self.slate_df['player_id'].isin(lineup_player_ids)]
+        bucket_counts = lineup_players['bucket'].value_counts().to_dict()
+        avg_ownership = lineup_players['own_proj'].mean()
+        
+        leverage_score = 0
+        for _, player in lineup_players.iterrows():
+            player_leverage = (100 - player['own_proj']) / 100
+            leverage_score += player_leverage
+        leverage_score = leverage_score / len(lineup_players)
+        
+        return {
+            'mega_chalk_count': bucket_counts.get('mega', 0),
+            'chalk_count': bucket_counts.get('chalk', 0),
+            'mid_count': bucket_counts.get('mid', 0),
+            'punt_count': bucket_counts.get('punt', 0),
+            'avg_ownership': avg_ownership,
+            'leverage_score': leverage_score * 100,
+            'strategy': self._classify_strategy(bucket_counts, avg_ownership)
+        }
+    
+    def _classify_strategy(self, bucket_counts, avg_ownership):
+        mega = bucket_counts.get('mega', 0)
+        chalk = bucket_counts.get('chalk', 0)
+        
+        if mega >= 2 or chalk >= 4:
+            return "Chalk Heavy"
+        elif bucket_counts.get('punt', 0) >= 3:
+            return "Contrarian Punt"
+        elif avg_ownership < 20:
+            return "Full Contrarian"
+        else:
+            return "Balanced"
+    
+    def compare_strategies(self, lineups_dict: Dict[str, List[str]], n_simulations: int = 1000) -> pd.DataFrame:
+        results = []
+        
+        for name, player_ids in lineups_dict.items():
+            win_prob = self.calculate_win_probability(player_ids, n_simulations)
+            ownership = self.analyze_ownership_pattern(player_ids)
+            
+            results.append({
+                'Lineup': name,
+                'Strategy': ownership['strategy'],
+                'Win Rate %': win_prob['win_rate'],
+                'Top 10% Rate': win_prob['top10_rate'],
+                'Avg Score': win_prob['avg_score'],
+                'Ceiling (90th)': win_prob['ceiling'],
+                'Floor (10th)': win_prob['floor'],
+                'Avg Own %': ownership['avg_ownership'],
+                'Leverage Score': win_prob['leverage_score'],
+                'Mega Chalk': ownership['mega_chalk_count'],
+                'Chalk': ownership['chalk_count'],
+                'Mid': ownership['mid_count'],
+                'Punt': ownership['punt_count']
+            })
+        
+        return pd.DataFrame(results)
+
+# --- DATA PREPARATION ---
+def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
     empty_df_cols = CORE_INTERNAL_COLS + ['player_id', 'GameID', 'bucket', 'value', 'Lock', 'Exclude']
     if pasted_data is None or not pasted_data.strip():
-        df = pd.DataFrame(columns=empty_df_cols)
-        return df
+        return pd.DataFrame(columns=empty_df_cols)
         
     try:
         data_io = io.StringIO(pasted_data)
-        
-        # Try to detect if it's tab-separated or comma-separated
         first_line = pasted_data.split('\n')[0]
+        
         if '\t' in first_line:
             df = pd.read_csv(data_io, sep='\t')
         else:
             df = pd.read_csv(data_io)
             
         st.success("✅ Data pasted successfully. Checking headers...")
-        
-        # --- CRITICAL FIX: STRIP WHITESPACE FROM ALL HEADERS ---
         df.columns = df.columns.str.strip()
         
-        # --- VALIDATE AND MAP REQUIRED COLUMNS ---
         actual_map = {}
         required_internal = ['Name', 'salary', 'positions', 'Team', 'Opponent', 'proj', 'own_proj']
         
@@ -380,37 +261,26 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
         if not all(col in df.columns for col in CORE_INTERNAL_COLS):
             st.error("Internal processing error: Required columns failed to map correctly.")
             return pd.DataFrame(columns=empty_df_cols)
-
         
     except Exception as e:
         st.error(f"Error processing pasted data: {e}")
         return pd.DataFrame(columns=empty_df_cols)
 
-
-    # --- FINAL PROCESSING ---
-    
     df['Team'] = df['Team'].astype(str)
     df['Opponent'] = df['Opponent'].astype(str)
-    df['GameID'] = df.apply(
-        lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1
-    )
+    df['GameID'] = df.apply(lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1)
     df['player_id'] = df['Name'] 
             
-    # Handle ownership - could be decimal (0.419) or percentage (41.9)
     df['own_proj'] = df['own_proj'].astype(str).str.replace('%', '', regex=False).str.replace(',', '.', regex=False)
     df['own_proj'] = pd.to_numeric(df['own_proj'], errors='coerce')
     
-    # Convert decimal ownership (0.419) to percentage (41.9)
     if df['own_proj'].max() <= 1.0 and df['own_proj'].max() > 0:
         df['own_proj'] = df['own_proj'] * 100
     
     df['own_proj'] = df['own_proj'].round(1)
-    
-    # Drop rows with missing core data
     df.dropna(subset=CORE_INTERNAL_COLS, inplace=True)
 
     try:
-        # Clean salary formatting
         df['salary'] = df['salary'].astype(str).str.strip()
         df['salary'] = df['salary'].str.replace('$', '', regex=False)
         df['salary'] = df['salary'].str.replace(',', '', regex=False)
@@ -445,24 +315,20 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
     if 'Exclude' not in df.columns: 
         df['Exclude'] = False
     
-    # Fill any missing columns for stability
     for col in empty_df_cols:
         if col not in df.columns:
             df[col] = None 
             
     return df
 
-# --- 2. SESSION STATE INITIALIZATION ---
-
+# --- SESSION STATE INITIALIZATION ---
 if 'optimal_lineups_results' not in st.session_state:
     st.session_state['optimal_lineups_results'] = {'lineups': [], 'ran': False}
 if 'edited_df' not in st.session_state:
     st.session_state['edited_df'] = pd.DataFrame(columns=CORE_INTERNAL_COLS + ['player_id', 'GameID', 'bucket', 'value', 'Lock', 'Exclude'])
 
-
-# --- STYLING FUNCTION FOR LINEUP DETAIL ---
+# --- STYLING FUNCTION ---
 def color_bucket(s):
-    """Applies color to the 'CATEGORY' column based on the value."""
     if s == 'mega':
         color = 'background-color: #9C3838; color: white'  
     elif s == 'chalk':
@@ -475,21 +341,12 @@ def color_bucket(s):
         color = ''
     return color
 
-
 def assign_lineup_positions(lineup_df):
-    """
-    Assigns each player to a legal DraftKings roster slot based on their position eligibility.
-    Returns the dataframe with a 'roster_slot' column or None if no valid assignment exists.
-    """
-    # Define the slots we need to fill in order of specificity
     slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-    
-    # Track which players are assigned
     assigned_players = set()
     slot_assignments = {}
     
     def can_play_slot(pos_string, slot):
-        """Check if a player with given positions can play a slot."""
         positions = [p.strip() for p in pos_string.split('/')]
         
         if slot == 'PG':
@@ -507,1156 +364,28 @@ def assign_lineup_positions(lineup_df):
         elif slot == 'F':
             return 'SF' in positions or 'PF' in positions
         elif slot == 'UTIL':
-            return True  # Anyone can play UTIL
+            return True
         return False
     
-    # Try to fill slots in order
     for slot in slots:
-        # Find available players who can fill this slot
         available = lineup_df[~lineup_df['player_id'].isin(assigned_players)].copy()
-        
-        # Filter to those eligible for this slot
         eligible = available[available['positions'].apply(lambda x: can_play_slot(x, slot))]
         
         if len(eligible) == 0:
-            return None  # Can't fill this slot
-        
-        # Assign the first eligible player (optimizer already chose optimal set)
+            return None
+            
         chosen = eligible.iloc[0]
         slot_assignments[slot] = chosen['player_id']
         assigned_players.add(chosen['player_id'])
     
-    # Create a new dataframe with slot assignments
     result_df = lineup_df.copy()
     result_df['roster_slot'] = result_df['player_id'].map({v: k for k, v in slot_assignments.items()})
     
     return result_df
 
+# ... [Continue with all the tab functions - I'll provide them in the next message to stay within limits]
 
-def display_multiple_lineups(slate_df, template, lineup_list):
-    """Function to display the top N optimized lineups with improved UI."""
-    
-    if not lineup_list:
-        st.error("❌ No valid lineups could be found that meet all constraints.")
-        st.warning("Try loosening your constraints or reducing the number of lineups requested.")
-        return
-    
-    # --- METRICS SECTION ---
-    best_lineup_data = lineup_list[0]
-    best_proj = best_lineup_data['proj_score']
-    
-    best_lineup_players_df = slate_df[slate_df['player_id'].isin(best_lineup_data['player_ids'])]
-    best_salary = best_lineup_players_df['salary'].sum()
-    best_value = best_proj / (best_salary / 1000) if best_salary else 0
-    
-    st.subheader("🚀 Top Lineup Metrics (Lineup 1)")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(label="Total Projected Points", 
-                  value=f"{best_proj:.2f}", 
-                  delta="Optimal Lineup Score")
-    with col2:
-        st.metric(label="Salary Used", 
-                  value=f"${best_salary:,}", 
-                  delta=f"${template.salary_cap - best_salary:,} Remaining")
-    with col3:
-        st.metric(label="Projection Value (X)", 
-                  value=f"{best_value:.2f}", 
-                  delta="Points per $1,000")
-
-    st.markdown("---") 
-
-    # --- SUMMARY TABLE ---
-    st.subheader("📋 Top Lineups Summary")
-    
-    summary_data = []
-    
-    for i, lineup_data in enumerate(lineup_list):
-        lineup_players_df = slate_df[slate_df['player_id'].isin(lineup_data['player_ids'])]
-        summary_data.append({
-            'Lineup': i + 1,
-            'Total Proj': lineup_data['proj_score'],
-            'Salary Used': lineup_players_df['salary'].sum(),
-            'Games Used': lineup_players_df['GameID'].nunique()
-        })
-        
-    summary_df = pd.DataFrame(summary_data).set_index('Lineup')
-    
-    st.dataframe(
-        summary_df.style.format({"Total Proj": "{:.2f}", "Salary Used": "${:,}"}), 
-        use_container_width=True
-    )
-    
-    st.subheader("🔎 Lineup Detail View")
-    
-    # User selection for detailed lineup
-    lineup_options = [f"Lineup {i+1} (Proj: {lineup_list[i]['proj_score']:.2f})" for i in range(len(lineup_list))]
-    lineup_selection = st.selectbox("Select Lineup for Detail View", options=lineup_options)
-    
-    lineup_index = lineup_options.index(lineup_selection)
-    selected_lineup_data = lineup_list[lineup_index]
-    selected_lineup_ids = selected_lineup_data['player_ids']
-
-    # Rebuild the dataframe for display
-    lineup_df = slate_df[slate_df['player_id'].isin(selected_lineup_ids)].copy()
-    
-    # IMPROVED: Assign positions based on actual eligibility
-    lineup_df = assign_lineup_positions(lineup_df)
-    
-    if lineup_df is None:
-        st.error("❌ Could not assign valid roster positions. This shouldn't happen if the optimizer is working correctly.")
-        return
-    
-    # Sort by position order
-    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-    position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
-    lineup_df['roster_slot'] = lineup_df['roster_slot'].astype(position_type)
-    lineup_df.sort_values(by='roster_slot', inplace=True)
-    
-    # Define display columns
-    display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
-    lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
-    
-    # Rename columns for display
-    lineup_df_display.rename(columns={
-        'roster_slot': 'SLOT', 
-        'positions': 'POS', 
-        'own_proj': 'OWN%', 
-        'Minutes': 'MIN', 
-        'FPPM': 'FP/M', 
-        'bucket': 'CATEGORY'
-    }, inplace=True)
-    
-    # Display with styling
-    styled_lineup_df = lineup_df_display.style.applymap(
-        color_bucket, subset=['CATEGORY']
-    ).format({
-        "salary": "${:,}", 
-        "proj": "{:.1f}", 
-        "value": "{:.2f}", 
-        "OWN%": "{:.1f}%", 
-        "MIN": "{:.1f}", 
-        "FP/M": "{:.2f}"
-    })
-    
-    st.dataframe(
-        styled_lineup_df, 
-        use_container_width=True,
-        hide_index=True 
-    )
-
-
-def tab_lineup_builder(slate_df, template):
-    """Render the Interactive Lineup Builder and run the multi-lineup Optimizer."""
-    
-    # Get tournament settings from session state
-    tournament_type = st.session_state.get('tournament_type', 'Single Entry GPP')
-    tournament_config = st.session_state.get('tournament_config', {})
-    contest_code = st.session_state.get('contest_code', 'SE')
-    
-    # Tournament Strategy Guide at the top
-    st.markdown(f"## 🎯 {tournament_type}")
-    
-    col1, col2, col3 = st.columns([2, 2, 1])
-    
-    with col1:
-        st.markdown(f"**Strategy:** {tournament_config.get('description', 'N/A')}")
-        st.caption(f"Field Size: ~{tournament_config.get('field_size', 0):,} entries")
-    
-    with col2:
-        payout_pct = tournament_config.get('top_payout_pct', 0.01) * 100
-        st.markdown(f"**Payout Structure:** Top {payout_pct:.2f}% pays")
-        
-        if payout_pct >= 40:
-            st.caption("🟢 High cash rate - prioritize floor/consistency")
-        elif payout_pct >= 10:
-            st.caption("🟡 Medium cash rate - balance floor and ceiling")
-        else:
-            st.caption("🔴 Low cash rate - prioritize ceiling/leverage")
-    
-    with col3:
-        rec_lineups = tournament_config.get('recommended_lineups', 1)
-        if rec_lineups == 1:
-            st.metric("Entries", "1", delta="Single entry")
-        else:
-            st.metric("Max Entries", rec_lineups)
-    
-    # Show recommended construction based on tournament type
-    if contest_code in TOURNAMENT_OWNERSHIP_TEMPLATES:
-        template_info = TOURNAMENT_OWNERSHIP_TEMPLATES[contest_code]
-        targets = template_info['ownership_targets']
-        
-        with st.expander("📋 Recommended Ownership Construction"):
-            st.markdown(f"**{template_info['name']}** - {template_info['description']}")
-            
-            construction_df = pd.DataFrame({
-                'Bucket': ['Punt (<10%)', 'Mid (10-30%)', 'Chalk (30-40%)', 'Mega (>40%)'],
-                'Target Range': [
-                    f"{targets['punt'][0]}-{targets['punt'][1]}",
-                    f"{targets['mid'][0]}-{targets['mid'][1]}",
-                    f"{targets['chalk'][0]}-{targets['chalk'][1]}",
-                    f"{targets['mega'][0]}-{targets['mega'][1]}"
-                ],
-                'Strategy': [
-                    '🔵 Low owned leverage plays',
-                    '🟢 Solid mid-tier value',
-                    '🟡 Popular but good plays',
-                    '🔴 Ultra-chalk stars'
-                ]
-            })
-            
-            st.table(construction_df)
-            
-            # Show what this means
-            st.info(f"""
-            **What this means for {tournament_type}:**
-            
-            Your lineups will target:
-            - **{targets['punt'][0]}-{targets['punt'][1]}** punt plays (under 10% owned - high leverage)
-            - **{targets['mid'][0]}-{targets['mid'][1]}** mid-tier plays (10-30% owned - balanced)
-            - **{targets['chalk'][0]}-{targets['chalk'][1]}** chalk plays (30-40% owned - popular picks)
-            - **{targets['mega'][0]}-{targets['mega'][1]}** mega chalk (over 40% - ultra popular)
-            """)
-    
-    st.markdown("---")
-    
-    st.header(f"1. Player Pool & Constraints")
-    
-    # --- A. PLAYER POOL EDITOR ---
-    st.markdown("Use the table to **🔒 Lock** or **❌ Exclude** players. The **Category** column shows ownership risk.")
-    
-    column_config = {
-        "Name": st.column_config.TextColumn("Player", disabled=True), 
-        "bucket": st.column_config.TextColumn("Category", disabled=True, help="punt (<10%), mid (10-30%), chalk (30-40%), mega (>40%)", width="small"),
-        "positions": st.column_config.TextColumn("Pos", disabled=True), 
-        "Team": st.column_config.TextColumn("Team", disabled=True, width="small"), 
-        "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
-        "salary": st.column_config.NumberColumn("Salary", format="$%d", width="small"), 
-        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f", width="small"), 
-        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), 
-        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f%%", width="small"),
-        "Minutes": st.column_config.NumberColumn("Min", format="%.1f", width="small"),
-        "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
-        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup", width="small"), 
-        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup", width="small"), 
-        "player_id": None, 
-        "GameID": None 
-    }
-    
-    column_order = [
-        'Lock', 'Exclude', 'Name', 'bucket', 'positions', 'Team', 'Opponent', 
-        'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM'
-    ]
-    
-    df_for_editor = slate_df.copy()
-    
-    if df_for_editor.empty:
-        st.info("✏️ Paste your player data into the text area in the sidebar and click the button to load the pool.")
-        
-        blank_df = pd.DataFrame(columns=column_order)
-        edited_df = st.data_editor(
-            blank_df, 
-            column_config=column_config,
-            column_order=column_order, 
-            hide_index=True,
-            use_container_width=True,
-            height=200, 
-            key="player_editor_blank"
-        )
-        st.session_state['edited_df'] = blank_df
-        st.markdown("---")
-        st.header("2. Find Optimal Lineups")
-        st.info("Optimization controls will be enabled once data is loaded.")
-        st.markdown("---")
-        st.header("3. Top 10 Lineups")
-        st.info("Lineup results will appear here.")
-        return 
-
-    df_for_editor = df_for_editor[column_order + ['player_id', 'GameID']]
-    
-    edited_df = st.data_editor(
-        df_for_editor, 
-        column_config=column_config,
-        column_order=column_order, 
-        hide_index=True,
-        use_container_width=True,
-        height=400,
-        key="player_editor_final"
-    )
-    st.session_state['edited_df'] = edited_df
-    
-    edited_df['player_id'] = edited_df['player_id'].astype(str)
-    
-    locked_player_ids = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
-    excluded_player_ids = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
-
-    if locked_player_ids or excluded_player_ids:
-        st.caption(f"🔒 **Locked:** {len(locked_player_ids)} | ❌ **Excluded:** {len(excluded_player_ids)}")
-
-    st.markdown("---")
-    
-    # --- B. OPTIMIZATION CONTROLS ---
-    st.header("2. Find Optimal Lineups")
-    
-    # Show tournament-specific recommendations
-    tournament_config = st.session_state.get('tournament_config', {})
-    recommended_n = tournament_config.get('recommended_lineups', 10)
-    
-    st.info(f"""
-    **💡 Recommendation for {tournament_type}:**
-    - Generate **{recommended_n}** lineup(s) for this tournament type
-    - Field size: ~{tournament_config.get('field_size', 10000):,} entries  
-    - {tournament_config.get('description', '')}
-    """)
-    
-    col_n, col_slack = st.columns(2)
-    
-    with col_n:
-        # Set default to recommended number
-        default_n = min(recommended_n, 20)
-        n_lineups = st.slider(
-            "Number of Lineups to Generate (N)", 
-            min_value=1, 
-            max_value=150, 
-            value=default_n, 
-            step=1,
-            help=f"Recommended: {recommended_n} for {tournament_type}"
-        )
-    
-    with col_slack:
-        # Adjust default slack based on tournament type
-        if contest_code == "CASH":
-            default_slack = 0  # Cash games should be strict
-        elif contest_code == "LARGE_GPP":
-            default_slack = 2  # Large field needs more flexibility
-        else:
-            default_slack = 1
-            
-        slack = st.slider(
-            "Ownership Target Slack (Flexibility)", 
-            min_value=0, 
-            max_value=4, 
-            value=default_slack, 
-            step=1,
-            help="Higher slack allows more deviation from ownership targets. Cash games use 0, GPPs use 1-2."
-        )
-    
-    # Multi-entry exposure controls
-    if n_lineups > 1:
-        st.markdown("---")
-        st.subheader("📊 Multi-Entry Exposure Controls")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            use_exposure = st.checkbox(
-                "Enable Exposure Limits",
-                value=(n_lineups >= 10),
-                help="Prevent overusing the same players across multiple lineups"
-            )
-        
-        with col2:
-            if use_exposure:
-                max_exposure = st.slider(
-                    "Max Player Exposure %",
-                    min_value=10,
-                    max_value=100,
-                    value=min(70, max(40, 100 // (n_lineups // 3 + 1))),
-                    step=5,
-                    help=f"Don't use any player in more than this % of your {n_lineups} lineups"
-                )
-                
-                # Calculate max times a player can appear
-                max_exposures_count = int((max_exposure / 100) * n_lineups)
-                st.caption(f"= Max {max_exposures_count} times per player across {n_lineups} lineups")
-        
-        # Stacking strategy for multi-entry
-        st.markdown("**Lineup Diversity Strategy:**")
-        
-        diversity_strategy = st.radio(
-            "How should lineups differ?",
-            options=[
-                "Maximum Diversity (Every lineup very different)",
-                "Moderate Diversity (Some overlap allowed)", 
-                "Core + Satellite (1-2 core players in all lineups)"
-            ],
-            index=1,
-            help="Balance between correlation and diversity"
-        )
-        
-        if diversity_strategy == "Core + Satellite":
-            st.info("💡 **Tip:** Lock your core player(s) in the table above, then generate lineups")
-    
-    
-    run_btn = st.button(f"✨ Generate Top {n_lineups} Lineups", use_container_width=True)
-    
-    if run_btn:
-        final_df = st.session_state['edited_df'].copy()
-        
-        final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
-        
-        conflict = set(locked_player_ids) & set(excluded_player_ids)
-        if conflict:
-            st.error(f"❌ CONFLICT: Player(s) {', '.join(conflict)} are both locked and excluded.")
-            return
-
-        with st.spinner(f'Calculating top {n_lineups} optimal lineups...'):
-            top_lineups = generate_top_n_lineups(
-                slate_df=final_df,
-                template=template,
-                n_lineups=n_lineups,
-                bucket_slack=slack,
-                locked_player_ids=locked_player_ids, 
-                excluded_player_ids=excluded_player_ids, 
-            )
-        
-        st.session_state['optimal_lineups_results'] = {
-            'lineups': top_lineups, 
-            'ran': True
-        }
-        
-        st.success(f"✅ Optimization complete! Found {len(top_lineups)} unique lineups.")
-
-    
-    st.markdown("---")
-    st.header(f"3. Top {n_lineups} Lineups")
-    
-    if st.session_state['optimal_lineups_results'].get('ran', False):
-        display_multiple_lineups(slate_df, template, st.session_state['optimal_lineups_results']['lineups'])
-
-    else:
-        st.info("Select the number of lineups and click 'Generate Top N Lineups' above to run the multi-lineup builder.")
-
-
-def tab_strategy_lab(slate_df, template):
-    """Render the Strategy Lab - Simulation and Pattern Analysis."""
-    st.header("🧪 Strategy Lab - Tournament Simulation")
-    
-    if slate_df.empty:
-        st.info("✏️ Paste your data into the sidebar text area to access the Strategy Lab.")
-        return
-    
-    st.markdown("""
-    This lab simulates thousands of tournaments to discover **which lineup construction patterns actually win**.
-    Compare chalk-heavy vs contrarian strategies using Monte Carlo simulation.
-    """)
-    
-    # Check if we have lineups to analyze
-    if not st.session_state['optimal_lineups_results'].get('ran', False):
-        st.warning("⚠️ Generate lineups first in the 'Lineup Builder' tab, then return here for simulation analysis.")
-        return
-    
-    lineups = st.session_state['optimal_lineups_results']['lineups']
-    
-    if not lineups:
-        st.info("No lineups available to simulate. Generate some lineups first!")
-        return
-    
-    # Simulation Controls
-    st.subheader("Simulation Parameters")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        field_size = st.selectbox(
-            "Tournament Field Size",
-            options=[1000, 5000, 10000, 50000, 150000],
-            index=2,
-            help="Number of entries in the tournament"
-        )
-    
-    with col2:
-        n_simulations = st.slider(
-            "Number of Simulations",
-            min_value=100,
-            max_value=5000,
-            value=1000,
-            step=100,
-            help="More simulations = more accurate results (but slower)"
-        )
-    
-    run_sim_btn = st.button("🎲 Run Tournament Simulation", use_container_width=True)
-    
-    if run_sim_btn or 'simulation_results' in st.session_state:
-        
-        if run_sim_btn:
-            with st.spinner(f'Running {n_simulations} tournament simulations...'):
-                simulator = TournamentSimulator(slate_df, field_size=field_size)
-                
-                # Analyze top 10 lineups
-                lineups_dict = {
-                    f"Lineup {i+1}": lineup['player_ids'] 
-                    for i, lineup in enumerate(lineups[:10])
-                }
-                
-                comparison_df = simulator.compare_strategies(lineups_dict, n_simulations=n_simulations)
-                st.session_state['simulation_results'] = comparison_df
-                st.session_state['simulator'] = simulator
-        
-        results_df = st.session_state.get('simulation_results')
-        
-        if results_df is not None and not results_df.empty:
-            
-            st.success("✅ Simulation Complete!")
-            
-            # Display Key Insights
-            st.subheader("📊 Simulation Results")
-            
-            # Metrics for best lineup
-            best_lineup = results_df.loc[results_df['Leverage Score'].idxmax()]
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric(
-                    "Best Leverage", 
-                    f"{best_lineup['Lineup']}", 
-                    f"{best_lineup['Leverage Score']:.1f}"
-                )
-            with col2:
-                st.metric(
-                    "Win Rate", 
-                    f"{best_lineup['Win Rate %']:.2f}%",
-                    delta=f"1 in {int(100/best_lineup['Win Rate %'])}"
-                )
-            with col3:
-                st.metric(
-                    "Strategy", 
-                    best_lineup['Strategy']
-                )
-            with col4:
-                st.metric(
-                    "Avg Ownership",
-                    f"{best_lineup['Avg Own %']:.1f}%"
-                )
-            
-            st.markdown("---")
-            
-            # DETAILED LINEUP VIEWER
-            st.subheader("🔍 Detailed Lineup Analysis")
-            
-            # Let user select which lineup to examine
-            lineup_names = results_df['Lineup'].tolist()
-            selected_lineup_name = st.selectbox(
-                "Select lineup to view details:",
-                options=lineup_names,
-                help="Choose a lineup to see the full player breakdown"
-            )
-            
-            # Get the selected lineup data
-            selected_idx = lineup_names.index(selected_lineup_name)
-            selected_lineup_player_ids = lineups[selected_idx]['player_ids']
-            selected_lineup_stats = results_df[results_df['Lineup'] == selected_lineup_name].iloc[0]
-            
-            # Display lineup stats
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Strategy", selected_lineup_stats['Strategy'])
-            with col2:
-                st.metric("Leverage Score", f"{selected_lineup_stats['Leverage Score']:.1f}")
-            with col3:
-                st.metric("Win Rate", f"{selected_lineup_stats['Win Rate %']:.3f}%")
-            with col4:
-                st.metric("Avg Ownership", f"{selected_lineup_stats['Avg Own %']:.1f}%")
-            
-            # Get player details for this lineup
-            lineup_detail_df = slate_df[slate_df['player_id'].isin(selected_lineup_player_ids)].copy()
-            
-            # Assign positions
-            lineup_detail_df = assign_lineup_positions(lineup_detail_df)
-            
-            if lineup_detail_df is not None:
-                # Sort by roster slot
-                ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-                position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
-                lineup_detail_df['roster_slot'] = lineup_detail_df['roster_slot'].astype(position_type)
-                lineup_detail_df = lineup_detail_df.sort_values('roster_slot')
-                
-                # Display columns
-                display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 
-                               'salary', 'proj', 'value', 'own_proj', 'bucket']
-                lineup_display = lineup_detail_df[display_cols].reset_index(drop=True)
-                
-                lineup_display.rename(columns={
-                    'roster_slot': 'SLOT',
-                    'positions': 'POS',
-                    'own_proj': 'OWN%',
-                    'bucket': 'CATEGORY'
-                }, inplace=True)
-                
-                # Style the lineup
-                styled_lineup = lineup_display.style.applymap(
-                    color_bucket, subset=['CATEGORY']
-                ).format({
-                    'salary': '${:,}',
-                    'proj': '{:.1f}',
-                    'value': '{:.2f}',
-                    'OWN%': '{:.1f}%'
-                })
-                
-                st.dataframe(styled_lineup, use_container_width=True, hide_index=True)
-                
-                # Show lineup totals
-                total_salary = lineup_detail_df['salary'].sum()
-                total_proj = lineup_detail_df['proj'].sum()
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Total Salary", f"${total_salary:,}")
-                with col2:
-                    st.metric("Total Projection", f"{total_proj:.1f}")
-                with col3:
-                    st.metric("Remaining Salary", f"${50000 - total_salary:,}")
-            
-            st.markdown("---")
-            
-            # Full Results Table
-            st.subheader("Full Lineup Comparison")
-            
-            # Format and display
-            display_df = results_df.copy()
-            
-            # Sort by leverage score for better display
-            display_df = display_df.sort_values('Leverage Score', ascending=False)
-            
-            # Color code by strategy
-            def color_strategy(val):
-                if val == "Chalk Heavy":
-                    return 'background-color: #9C3838; color: white'
-                elif val == "Contrarian Punt":
-                    return 'background-color: #3D85C6; color: white'
-                elif val == "Full Contrarian":
-                    return 'background-color: #38761D; color: white'
-                else:
-                    return 'background-color: #A37F34; color: white'
-            
-            # Highlight best leverage score
-            def highlight_best_leverage(s):
-                if s.name == 'Leverage Score':
-                    max_val = s.max()
-                    return ['background-color: #90EE90' if v == max_val else '' for v in s]
-                return ['' for _ in s]
-            
-            styled_df = display_df.style.applymap(
-                color_strategy, subset=['Strategy']
-            ).apply(
-                highlight_best_leverage, axis=0
-            ).format({
-                'Win Rate %': '{:.3f}%',
-                'Top 10% Rate': '{:.2f}%',
-                'Avg Score': '{:.1f}',
-                'Ceiling (90th)': '{:.1f}',
-                'Floor (10th)': '{:.1f}',
-                'Avg Own %': '{:.1f}%',
-                'Leverage Score': '{:.1f}'
-            })
-            
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-            
-            st.markdown("---")
-            
-            # Strategy Pattern Analysis
-            st.subheader("📈 Ownership Construction Patterns")
-            
-            st.markdown("""
-            **How to read this:**
-            - **Mega Chalk** = Players with >40% ownership
-            - **Chalk** = Players with 30-40% ownership  
-            - **Mid** = Players with 10-30% ownership
-            - **Punt** = Players with <10% ownership
-            
-            **Leverage Score** = Win Rate × Uniqueness (higher = better tournament EV)
-            """)
-            
-            # Pattern breakdown
-            pattern_cols = ['Lineup', 'Strategy', 'Mega Chalk', 'Chalk', 'Mid', 'Punt', 'Leverage Score']
-            pattern_df = results_df[pattern_cols].copy()
-            pattern_df = pattern_df.sort_values('Leverage Score', ascending=False)
-            
-            # Highlight top 3 leverage scores
-            def highlight_top_leverage(s):
-                if s.name == 'Leverage Score':
-                    sorted_vals = s.sort_values(ascending=False)
-                    top_3 = sorted_vals.head(3).values
-                    colors = []
-                    for v in s:
-                        if v == top_3[0]:
-                            colors.append('background-color: #90EE90; font-weight: bold')
-                        elif len(top_3) > 1 and v == top_3[1]:
-                            colors.append('background-color: #C1FFC1')
-                        elif len(top_3) > 2 and v == top_3[2]:
-                            colors.append('background-color: #E0FFE0')
-                        else:
-                            colors.append('')
-                    return colors
-                return ['' for _ in s]
-            
-            st.dataframe(
-                pattern_df.style.apply(highlight_top_leverage, axis=0),
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # Insights
-            st.markdown("---")
-            st.subheader("💡 Key Insights")
-            
-            # Calculate insights
-            best_strategy = results_df.loc[results_df['Leverage Score'].idxmax(), 'Strategy']
-            avg_leverage = results_df['Leverage Score'].mean()
-            
-            chalk_heavy = results_df[results_df['Strategy'] == 'Chalk Heavy']
-            contrarian = results_df[results_df['Strategy'].str.contains('Contrarian')]
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**🎯 Optimal Strategy Found:**")
-                st.write(f"- **{best_strategy}** has highest leverage")
-                st.write(f"- Average lineup leverage: {avg_leverage:.1f}")
-                
-                if len(chalk_heavy) > 0:
-                    st.write(f"- Chalk-heavy win rate: {chalk_heavy['Win Rate %'].mean():.3f}%")
-                if len(contrarian) > 0:
-                    st.write(f"- Contrarian win rate: {contrarian['Win Rate %'].mean():.3f}%")
-            
-            with col2:
-                st.markdown("**📊 Pattern Analysis:**")
-                avg_mega = results_df['Mega Chalk'].mean()
-                avg_punt = results_df['Punt'].mean()
-                
-                st.write(f"- Average mega chalk players: {avg_mega:.1f}")
-                st.write(f"- Average punt plays: {avg_punt:.1f}")
-                st.write(f"- Winning construction: {int(best_lineup['Mega Chalk'])} mega, {int(best_lineup['Chalk'])} chalk, {int(best_lineup['Mid'])} mid, {int(best_lineup['Punt'])} punt")
-
-
-def tab_results_analysis(slate_df, template):
-    """Render the Results Analysis - Compare projections vs actuals."""
-    st.header("📈 Results Analysis - Actual Performance")
-    
-    if slate_df.empty:
-        st.info("✏️ Load your player data first in the sidebar.")
-        return
-    
-    st.markdown("""
-    Upload actual game results to see how your projections performed.
-    Compare projected vs actual scores and ownership.
-    """)
-    
-    st.subheader("Paste Actual Results Data")
-    
-    actual_results_data = st.text_area(
-        "Paste actual results (Player, Roster Position, %Drafted, FPTS):",
-        height=200,
-        placeholder="Player\tRoster Position\t%Drafted\tFPTS\nNikola Jokic\tC\t7.78%\t66.75"
-    )
-    
-    load_results_btn = st.button("Load Actual Results", use_container_width=True)
-    
-    if load_results_btn and actual_results_data:
-        with st.spinner("Processing actual results..."):
-            try:
-                # Parse the actual results
-                data_io = io.StringIO(actual_results_data)
-                
-                # Detect separator
-                first_line = actual_results_data.split('\n')[0]
-                if '\t' in first_line:
-                    actuals_df = pd.read_csv(data_io, sep='\t')
-                else:
-                    actuals_df = pd.read_csv(data_io)
-                
-                # Clean column names
-                actuals_df.columns = actuals_df.columns.str.strip()
-                
-                # Standardize column names
-                col_map = {
-                    'Player': 'Name',
-                    '%Drafted': 'actual_own',
-                    'FPTS': 'actual_pts'
-                }
-                actuals_df.rename(columns=col_map, inplace=True)
-                
-                # Clean ownership (remove %)
-                actuals_df['actual_own'] = actuals_df['actual_own'].astype(str).str.replace('%', '').astype(float)
-                actuals_df['actual_pts'] = pd.to_numeric(actuals_df['actual_pts'], errors='coerce')
-                
-                # Merge with slate data
-                merged_df = slate_df.merge(
-                    actuals_df[['Name', 'actual_own', 'actual_pts']], 
-                    on='Name', 
-                    how='left'
-                )
-                
-                # Store in session state
-                st.session_state['results_df'] = merged_df
-                st.success(f"✅ Loaded actual results for {len(actuals_df)} players!")
-                
-            except Exception as e:
-                st.error(f"Error loading results: {e}")
-                return
-    
-    # Display analysis if results are loaded
-    if 'results_df' in st.session_state:
-        results_df = st.session_state['results_df']
-        
-        # Filter to only players with actual results
-        results_df_with_actuals = results_df.dropna(subset=['actual_pts']).copy()
-        
-        if len(results_df_with_actuals) == 0:
-            st.warning("No actual results found. Make sure player names match exactly.")
-            return
-        
-        # Calculate differences
-        results_df_with_actuals['pts_diff'] = results_df_with_actuals['actual_pts'] - results_df_with_actuals['proj']
-        results_df_with_actuals['own_diff'] = results_df_with_actuals['actual_own'] - results_df_with_actuals['own_proj']
-        results_df_with_actuals['pts_pct_diff'] = (results_df_with_actuals['pts_diff'] / results_df_with_actuals['proj'] * 100).round(1)
-        
-        # Overall metrics
-        st.subheader("📊 Overall Projection Accuracy")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        avg_proj_error = results_df_with_actuals['pts_diff'].mean()
-        avg_own_error = results_df_with_actuals['own_diff'].mean()
-        total_proj = results_df_with_actuals['proj'].sum()
-        total_actual = results_df_with_actuals['actual_pts'].sum()
-        
-        with col1:
-            st.metric("Avg Points Error", f"{avg_proj_error:+.2f}", 
-                     delta=f"{(avg_proj_error/results_df_with_actuals['proj'].mean()*100):+.1f}%")
-        with col2:
-            st.metric("Avg Own% Error", f"{avg_own_error:+.2f}%")
-        with col3:
-            st.metric("Total Proj", f"{total_proj:.1f}")
-        with col4:
-            st.metric("Total Actual", f"{total_actual:.1f}", 
-                     delta=f"{total_actual - total_proj:+.1f}")
-        
-        st.markdown("---")
-        
-        # Top performers vs projection
-        st.subheader("🚀 Biggest Outperformers (vs Projection)")
-        
-        top_outperform = results_df_with_actuals.nlargest(10, 'pts_diff')[
-            ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'pts_diff', 'own_proj', 'actual_own']
-        ]
-        
-        st.dataframe(
-            top_outperform.style.format({
-                'salary': '${:,}',
-                'proj': '{:.1f}',
-                'actual_pts': '{:.1f}',
-                'pts_diff': '{:+.1f}',
-                'own_proj': '{:.1f}%',
-                'actual_own': '{:.1f}%'
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        st.markdown("---")
-        
-        # Biggest busts
-        st.subheader("📉 Biggest Underperformers (vs Projection)")
-        
-        top_underperform = results_df_with_actuals.nsmallest(10, 'pts_diff')[
-            ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'pts_diff', 'own_proj', 'actual_own']
-        ]
-        
-        st.dataframe(
-            top_underperform.style.format({
-                'salary': '${:,}',
-                'proj': '{:.1f}',
-                'actual_pts': '{:.1f}',
-                'pts_diff': '{:+.1f}',
-                'own_proj': '{:.1f}%',
-                'actual_own': '{:.1f}%'
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
-        
-        st.markdown("---")
-        
-        # Check lineup performance if lineups exist
-        if st.session_state['optimal_lineups_results'].get('ran', False):
-            st.subheader("🏆 Your Lineups - Tournament Performance")
-            
-            lineups = st.session_state['optimal_lineups_results']['lineups']
-            
-            lineup_performance = []
-            
-            for i, lineup in enumerate(lineups[:20]):  # All generated lineups
-                lineup_players = results_df[results_df['player_id'].isin(lineup['player_ids'])]
-                
-                # Calculate actual score if all players have results
-                if lineup_players['actual_pts'].notna().all():
-                    actual_score = lineup_players['actual_pts'].sum()
-                    proj_score = lineup['proj_score']
-                    diff = actual_score - proj_score
-                    
-                    # Get salary and ownership info
-                    total_salary = lineup_players['salary'].sum()
-                    avg_ownership = lineup_players['own_proj'].mean()
-                    actual_avg_own = lineup_players['actual_own'].mean()
-                    
-                    # Count bucket distribution
-                    bucket_counts = lineup_players['bucket'].value_counts().to_dict()
-                    
-                    lineup_performance.append({
-                        'Lineup': f"Lineup {i+1}",
-                        'Projected': proj_score,
-                        'Actual': actual_score,
-                        'Difference': diff,
-                        'Accuracy %': ((actual_score / proj_score) - 1) * 100,
-                        'Salary': total_salary,
-                        'Proj Own%': avg_ownership,
-                        'Actual Own%': actual_avg_own,
-                        'Mega': bucket_counts.get('mega', 0),
-                        'Chalk': bucket_counts.get('chalk', 0),
-                        'Mid': bucket_counts.get('mid', 0),
-                        'Punt': bucket_counts.get('punt', 0),
-                        'player_ids': lineup['player_ids']
-                    })
-            
-            if lineup_performance:
-                perf_df = pd.DataFrame(lineup_performance)
-                
-                # Sort by actual score (best to worst)
-                perf_df = perf_df.sort_values('Actual', ascending=False).reset_index(drop=True)
-                perf_df['Rank'] = range(1, len(perf_df) + 1)
-                
-                # Tournament placement analysis
-                st.markdown("---")
-                st.subheader("🎯 Tournament Leaderboard")
-                
-                # Show top 3 with medals
-                col1, col2, col3 = st.columns(3)
-                
-                if len(perf_df) >= 1:
-                    with col1:
-                        st.markdown("### 🥇 1st Place")
-                        st.metric("Lineup", perf_df.iloc[0]['Lineup'])
-                        st.metric("Actual Score", f"{perf_df.iloc[0]['Actual']:.2f}")
-                        st.metric("Beat Projection By", f"{perf_df.iloc[0]['Difference']:+.2f}")
-                
-                if len(perf_df) >= 2:
-                    with col2:
-                        st.markdown("### 🥈 2nd Place")
-                        st.metric("Lineup", perf_df.iloc[1]['Lineup'])
-                        st.metric("Actual Score", f"{perf_df.iloc[1]['Actual']:.2f}")
-                        st.metric("Beat Projection By", f"{perf_df.iloc[1]['Difference']:+.2f}")
-                
-                if len(perf_df) >= 3:
-                    with col3:
-                        st.markdown("### 🥉 3rd Place")
-                        st.metric("Lineup", perf_df.iloc[2]['Lineup'])
-                        st.metric("Actual Score", f"{perf_df.iloc[2]['Actual']:.2f}")
-                        st.metric("Beat Projection By", f"{perf_df.iloc[2]['Difference']:+.2f}")
-                
-                st.markdown("---")
-                
-                # Full leaderboard
-                st.subheader("📊 Complete Lineup Rankings")
-                
-                display_cols = ['Rank', 'Lineup', 'Actual', 'Projected', 'Difference', 'Accuracy %', 
-                               'Salary', 'Proj Own%', 'Actual Own%', 'Mega', 'Chalk', 'Mid', 'Punt']
-                display_perf = perf_df[display_cols].copy()
-                
-                # Color code top 3
-                def highlight_podium(s):
-                    if s.name == 'Rank':
-                        colors = []
-                        for v in s:
-                            if v == 1:
-                                colors.append('background-color: #FFD700; font-weight: bold')  # Gold
-                            elif v == 2:
-                                colors.append('background-color: #C0C0C0; font-weight: bold')  # Silver
-                            elif v == 3:
-                                colors.append('background-color: #CD7F32; font-weight: bold')  # Bronze
-                            else:
-                                colors.append('')
-                        return colors
-                    return ['' for _ in s]
-                
-                styled_perf = display_perf.style.apply(highlight_podium, axis=0).format({
-                    'Projected': '{:.2f}',
-                    'Actual': '{:.2f}',
-                    'Difference': '{:+.2f}',
-                    'Accuracy %': '{:+.1f}%',
-                    'Salary': '${:,}',
-                    'Proj Own%': '{:.1f}%',
-                    'Actual Own%': '{:.1f}%'
-                })
-                
-                st.dataframe(styled_perf, use_container_width=True, hide_index=True)
-                
-                st.markdown("---")
-                
-                # Detailed view selector
-                st.subheader("🔍 Lineup Details")
-                
-                selected_lineup = st.selectbox(
-                    "Select lineup to view player breakdown:",
-                    options=perf_df['Lineup'].tolist(),
-                    help="See which players hit/missed in each lineup"
-                )
-                
-                # Get selected lineup data
-                selected_idx = perf_df[perf_df['Lineup'] == selected_lineup].index[0]
-                selected_lineup_data = perf_df.iloc[selected_idx]
-                selected_player_ids = selected_lineup_data['player_ids']
-                
-                # Display lineup metrics
-                col1, col2, col3, col4, col5 = st.columns(5)
-                with col1:
-                    st.metric("Rank", f"#{selected_lineup_data['Rank']}")
-                with col2:
-                    st.metric("Actual Score", f"{selected_lineup_data['Actual']:.2f}")
-                with col3:
-                    st.metric("vs Projection", f"{selected_lineup_data['Difference']:+.2f}")
-                with col4:
-                    st.metric("Avg Ownership", f"{selected_lineup_data['Actual Own%']:.1f}%")
-                with col5:
-                    st.metric("Construction", f"{int(selected_lineup_data['Mega'])}-{int(selected_lineup_data['Chalk'])}-{int(selected_lineup_data['Mid'])}-{int(selected_lineup_data['Punt'])}")
-                
-                # Show player breakdown
-                lineup_detail = results_df[results_df['player_id'].isin(selected_player_ids)].copy()
-                lineup_detail['pts_diff'] = lineup_detail['actual_pts'] - lineup_detail['proj']
-                lineup_detail['own_diff'] = lineup_detail['actual_own'] - lineup_detail['own_proj']
-                
-                # Assign positions
-                lineup_detail = assign_lineup_positions(lineup_detail)
-                
-                if lineup_detail is not None:
-                    ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-                    position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
-                    lineup_detail['roster_slot'] = lineup_detail['roster_slot'].astype(position_type)
-                    lineup_detail = lineup_detail.sort_values('roster_slot')
-                    
-                    display_cols = ['roster_slot', 'Name', 'positions', 'salary', 'proj', 'actual_pts', 
-                                   'pts_diff', 'own_proj', 'actual_own', 'bucket']
-                    lineup_display = lineup_detail[display_cols].copy()
-                    
-                    lineup_display.rename(columns={
-                        'roster_slot': 'SLOT',
-                        'positions': 'POS',
-                        'proj': 'Proj',
-                        'actual_pts': 'Actual',
-                        'pts_diff': '+/-',
-                        'own_proj': 'Proj Own%',
-                        'actual_own': 'Actual Own%',
-                        'bucket': 'Category'
-                    }, inplace=True)
-                    
-                    # Style with positive/negative differences
-                    def color_diff(val):
-                        if isinstance(val, (int, float)):
-                            if val > 5:
-                                return 'background-color: #90EE90'  # Green for good
-                            elif val < -5:
-                                return 'background-color: #FFB6C6'  # Red for bad
-                        return ''
-                    
-                    styled_lineup = lineup_display.style.applymap(
-                        color_bucket, subset=['Category']
-                    ).applymap(
-                        color_diff, subset=['+/-']
-                    ).format({
-                        'salary': '${:,}',
-                        'Proj': '{:.1f}',
-                        'Actual': '{:.1f}',
-                        '+/-': '{:+.1f}',
-                        'Proj Own%': '{:.1f}%',
-                        'Actual Own%': '{:.1f}%'
-                    })
-                    
-                    st.dataframe(styled_lineup, use_container_width=True, hide_index=True)
-                    
-                    # Key insights
-                    st.markdown("**Key Insights:**")
-                    best_player = lineup_detail.loc[lineup_detail['pts_diff'].idxmax()]
-                    worst_player = lineup_detail.loc[lineup_detail['pts_diff'].idxmin()]
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.success(f"✅ **Best Pick:** {best_player['Name']} ({best_player['pts_diff']:+.1f} vs proj)")
-                    with col2:
-                        if worst_player['pts_diff'] < -5:
-                            st.error(f"❌ **Worst Pick:** {worst_player['Name']} ({worst_player['pts_diff']:+.1f} vs proj)")
-                        else:
-                            st.info(f"⚠️ **Lowest:** {worst_player['Name']} ({worst_player['pts_diff']:+.1f} vs proj)")
-                
-                st.markdown("---")
-                
-                # Strategy analysis
-                st.subheader("📈 Strategy Performance Analysis")
-                
-                # Group by construction pattern
-                perf_df['Construction'] = (perf_df['Mega'].astype(str) + '-' + 
-                                          perf_df['Chalk'].astype(str) + '-' + 
-                                          perf_df['Mid'].astype(str) + '-' + 
-                                          perf_df['Punt'].astype(str))
-                
-                strategy_analysis = perf_df.groupby('Construction').agg({
-                    'Actual': ['mean', 'max', 'min'],
-                    'Difference': 'mean',
-                    'Accuracy %': 'mean'
-                }).round(2)
-                
-                strategy_analysis.columns = ['Avg Score', 'Best Score', 'Worst Score', 'Avg Diff', 'Avg Accuracy %']
-                strategy_analysis = strategy_analysis.sort_values('Avg Score', ascending=False)
-                
-                st.dataframe(strategy_analysis, use_container_width=True)
-                
-                st.markdown("""
-                **Construction Format:** Mega-Chalk-Mid-Punt
-                - **Mega** = >40% ownership
-                - **Chalk** = 30-40% ownership
-                - **Mid** = 10-30% ownership
-                - **Punt** = <10% ownership
-                """)
-                
-            else:
-                st.info("⚠️ Some players in your lineups don't have actual results yet. Load complete results to see performance.")
-        else:
-            st.info("💡 Generate lineups in the 'Lineup Builder' tab first, then come back here after games finish to see how they performed!")
-
-
-def tab_contest_analyzer(slate_df, template):
-    """Render the Contest Analyzer."""
-    st.header("Contest Strategy Analyzer")
-    
-    if slate_df.empty:
-        st.info("✏️ Paste your data into the sidebar text area to view the contest analyzer.")
-        return
-
-    st.info(f"Analysis based on: **{template.contest_label}**")
-
-    st.subheader("Target Ownership Structure")
-    ranges = template.bucket_ranges(slack=0) 
-    
-    range_data = {
-        "Ownership Bucket": ["Punt (<10%)", "Mid (10-30%)", "Chalk (30-40%)", "Mega Chalk (>40%)"],
-        "Target Player Count": [
-            f"{ranges['punt'][0]}-{ranges['punt'][1]}",
-            f"{ranges['mid'][0]}-{ranges['mid'][1]}",
-            f"{ranges['chalk'][0]}-{ranges['chalk'][1]}",
-            f"{ranges['mega'][0]}-{ranges['mega'][1]}"
-        ]
-    }
-    st.table(pd.DataFrame(range_data))
-
-    st.subheader("Your Player Pool Distribution")
-    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
-    st.bar_chart(pool_counts)
-
-
-# --- 4. MAIN ENTRY POINT ---
-
+# --- MAIN ENTRY POINT ---
 if __name__ == '__main__':
     
     # Sidebar
@@ -1666,7 +395,6 @@ if __name__ == '__main__':
         
         st.subheader("🎯 Tournament Selection")
         
-        # Tournament type selection
         tournament_type = st.selectbox(
             "Select Tournament Type",
             options=[
@@ -1681,119 +409,36 @@ if __name__ == '__main__':
             help="Different tournaments require different strategies"
         )
         
-        # Map tournament types to strategy codes
         tournament_map = {
-            "Single Entry GPP": {
-                "code": "SE",
-                "description": "High leverage, unique builds. Go contrarian to win big.",
-                "field_size": 10000,
-                "top_payout_pct": 0.001,
-                "recommended_lineups": 1
-            },
-            "3-Max GPP": {
-                "code": "3MAX",
-                "description": "Balanced variety. Mix chalk with contrarian.",
-                "field_size": 15000,
-                "top_payout_pct": 0.001,
-                "recommended_lineups": 3
-            },
-            "20-Max GPP": {
-                "code": "20MAX",
-                "description": "High diversity required. Multiple construction styles.",
-                "field_size": 50000,
-                "top_payout_pct": 0.0005,
-                "recommended_lineups": 20
-            },
-            "150-Max GPP (Large Field)": {
-                "code": "LARGE_GPP",
-                "description": "Maximum leverage and diversity needed.",
-                "field_size": 150000,
-                "top_payout_pct": 0.0001,
-                "recommended_lineups": 150
-            },
-            "Cash Game (50/50, Double Up)": {
-                "code": "CASH",
-                "description": "Safety first. High floor, chalk plays, consistency.",
-                "field_size": 1000,
-                "top_payout_pct": 0.50,
-                "recommended_lineups": 1
-            },
-            "Showdown Captain Mode": {
-                "code": "SHOWDOWN",
-                "description": "Single game. Correlations matter most.",
-                "field_size": 5000,
-                "top_payout_pct": 0.001,
-                "recommended_lineups": 20
-            },
-            "Custom": {
-                "code": "SE",
-                "description": "Custom settings",
-                "field_size": 10000,
-                "top_payout_pct": 0.01,
-                "recommended_lineups": 10
-            }
+            "Single Entry GPP": {"code": "SE", "description": "High leverage, unique builds. Go contrarian to win big.", "field_size": 10000, "top_payout_pct": 0.001, "recommended_lineups": 1},
+            "3-Max GPP": {"code": "3MAX", "description": "Balanced variety. Mix chalk with contrarian.", "field_size": 15000, "top_payout_pct": 0.001, "recommended_lineups": 3},
+            "20-Max GPP": {"code": "20MAX", "description": "High diversity required. Multiple construction styles.", "field_size": 50000, "top_payout_pct": 0.0005, "recommended_lineups": 20},
+            "150-Max GPP (Large Field)": {"code": "LARGE_GPP", "description": "Maximum leverage and diversity needed.", "field_size": 150000, "top_payout_pct": 0.0001, "recommended_lineups": 150},
+            "Cash Game (50/50, Double Up)": {"code": "CASH", "description": "Safety first. High floor, chalk plays, consistency.", "field_size": 1000, "top_payout_pct": 0.50, "recommended_lineups": 1},
+            "Showdown Captain Mode": {"code": "SHOWDOWN", "description": "Single game. Correlations matter most.", "field_size": 5000, "top_payout_pct": 0.001, "recommended_lineups": 20},
+            "Custom": {"code": "SE", "description": "Custom settings", "field_size": 10000, "top_payout_pct": 0.01, "recommended_lineups": 10}
         }
         
         tournament_config = tournament_map[tournament_type]
         
-        # Show tournament info
         st.info(f"**Strategy:** {tournament_config['description']}")
         st.caption(f"Avg Field Size: ~{tournament_config['field_size']:,}")
         st.caption(f"Top {tournament_config['top_payout_pct']*100}% pays out")
         
-        # Advanced settings expander
         with st.expander("⚙️ Advanced Tournament Settings"):
-            ownership_strategy = "Balanced"  # Default value
+            ownership_strategy = "Balanced"
             
             if tournament_type == "Custom":
-                custom_field_size = st.number_input(
-                    "Field Size",
-                    min_value=100,
-                    max_value=500000,
-                    value=10000,
-                    step=1000
-                )
+                custom_field_size = st.number_input("Field Size", min_value=100, max_value=500000, value=10000, step=1000)
                 tournament_config['field_size'] = custom_field_size
                 
-                custom_payout_pct = st.slider(
-                    "Top % That Pays",
-                    min_value=0.01,
-                    max_value=50.0,
-                    value=1.0,
-                    step=0.01,
-                    format="%.2f%%"
-                ) / 100
+                custom_payout_pct = st.slider("Top % That Pays", min_value=0.01, max_value=50.0, value=1.0, step=0.01, format="%.2f%%") / 100
                 tournament_config['top_payout_pct'] = custom_payout_pct
             
-            # Ownership strategy override
-            ownership_strategy = st.select_slider(
-                "Ownership Strategy",
-                options=["Full Chalk", "Balanced", "Contrarian", "Max Leverage"],
-                value="Balanced",
-                help="Override the default strategy for this tournament type"
-            )
+            ownership_strategy = st.select_slider("Ownership Strategy", options=["Full Chalk", "Balanced", "Contrarian", "Max Leverage"], value="Balanced", help="Override the default strategy for this tournament type")
             
-            # Salary floor
-            min_salary = st.slider(
-                "Minimum Salary to Use",
-                min_value=40000,
-                max_value=50000,
-                value=48000,
-                step=500,
-                help="Don't leave too much salary on the table"
-            )
+            min_salary = st.slider("Minimum Salary to Use", min_value=40000, max_value=50000, value=48000, step=500, help="Don't leave too much salary on the table")
         
-        # Map ownership strategy to contest code (moved outside the expander)
-        if ownership_strategy == "Full Chalk":
-            contest_code = "CASH"
-        elif ownership_strategy == "Contrarian":
-            contest_code = "LARGE_GPP"
-        elif ownership_strategy == "Max Leverage":
-            contest_code = "LARGE_GPP"
-        else:
-            contest_code = tournament_config['code']
-        
-        # Map ownership strategy to contest code
         if ownership_strategy == "Full Chalk":
             contest_code = "CASH"
         elif ownership_strategy == "Contrarian":
@@ -1806,11 +451,7 @@ if __name__ == '__main__':
         st.divider()
         st.subheader("Paste Player Pool Data (CSV Format)")
         
-        pasted_csv_data = st.text_area(
-            "Copy your player pool data (including headers) and paste it here:",
-            height=200,
-            placeholder="Player\tSalary\tPosition\tTeam\tOpponent\tMinutes\tFPPM\tProjection\tValue\tOwnership"
-        )
+        pasted_csv_data = st.text_area("Copy your player pool data (including headers) and paste it here:", height=200, placeholder="Player\tSalary\tPosition\tTeam\tOpponent\tMinutes\tFPPM\tProjection\tValue\tOwnership")
         
         load_data_btn = st.button("Load Pasted Data", use_container_width=True)
         
@@ -1825,19 +466,21 @@ if __name__ == '__main__':
                     else:
                         st.error("❌ Failed to load data. Check the format and try again.")
             else:
-    # Store tournament config in session state BEFORE processing data
+                st.warning("⚠️ Please paste some data first!")
+    
+    # Store tournament config
     st.session_state['tournament_type'] = tournament_type
     st.session_state['tournament_config'] = tournament_config
     st.session_state['contest_code'] = contest_code
     st.session_state['ownership_strategy'] = ownership_strategy
     
-    # Initialize slate_df from session state
+    # Initialize slate_df
     if 'slate_df' not in st.session_state:
         st.session_state['slate_df'] = pd.DataFrame(columns=CORE_INTERNAL_COLS + ['player_id', 'GameID', 'bucket', 'value', 'Lock', 'Exclude'])
     
     slate_df = st.session_state['slate_df']
     
-    # Build template using the contest code from sidebar
+    # Build template
     template = build_template_from_params(
         contest_type=contest_code,
         field_size=tournament_config['field_size'],
@@ -1847,17 +490,5 @@ if __name__ == '__main__':
         min_games=MIN_GAMES_REQUIRED
     )
     
-    # Main tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🏗️ Lineup Builder", "🧪 Strategy Lab", "📈 Results Analysis", "📊 Contest Analyzer"])
-    
-    with tab1:
-        tab_lineup_builder(slate_df, template)
-    
-    with tab2:
-        tab_strategy_lab(slate_df, template)
-    
-    with tab3:
-        tab_results_analysis(slate_df, template)
-    
-    with tab4:
-        tab_contest_analyzer(slate_df, template)
+    # Placeholder for tabs - will add full tab functions in requirements
+    st.info("App structure loaded successfully. Tab functions loading...")
