@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List, Tuple
-# Import the new multi-lineup generation function
+# Import the multi-lineup generation function
 from builder import (
     build_template_from_params, 
     generate_top_n_lineups, 
@@ -16,13 +16,16 @@ from builder import (
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
 
-# --- HEADER MAPPING ---
+# --- HEADER MAPPING (UPDATED FOR YOUR CSV) ---
+# Maps your input CSV headers to the internal names used by the script.
 REQUIRED_CSV_TO_INTERNAL_MAP = {
     'Salary': 'salary',
     'Position': 'positions',
     'Projection': 'proj',
     'Ownership': 'own_proj',
+    'Player': 'Name' 
 }
+
 
 # --- 1. DATA PREPARATION ---
 
@@ -32,51 +35,54 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     df = pd.DataFrame()
     
     if uploaded_file is not None:
-        # Data loading and preprocessing logic (as previously verified)
         try:
             df = pd.read_csv(uploaded_file)
             st.success("✅ Data loaded successfully.")
-
-            if 'Player' in df.columns:
-                df.rename(columns={'Player': 'Name'}, inplace=True)
             
+            # Check for required columns based on the new mapping
             missing_csv_cols = [col for col in REQUIRED_CSV_TO_INTERNAL_MAP.keys() if col not in df.columns]
             if missing_csv_cols:
                 st.error(f"Missing headers: {missing_csv_cols}. Required: {list(REQUIRED_CSV_TO_INTERNAL_MAP.keys())}")
                 return pd.DataFrame()
             
+            # Rename columns using the new mapping
             df.rename(columns=REQUIRED_CSV_TO_INTERNAL_MAP, inplace=True)
             
+            # Create GameID (Requires Team and Opponent columns)
             required_game_cols = ['Team', 'Opponent']
             if 'GameID' not in df.columns:
                 if all(col in df.columns for col in required_game_cols):
+                    # Ensure columns are treated as strings before joining
+                    df['Team'] = df['Team'].astype(str)
+                    df['Opponent'] = df['Opponent'].astype(str)
                     df['GameID'] = df.apply(
-                        lambda row: '@'.join(sorted([str(row['Team']), str(row['Opponent'])])), axis=1
+                        lambda row: '@'.join(sorted([row['Team'], row['Opponent']])), axis=1
                     )
                 else:
-                    st.error("Missing required columns: **Team** and **Opponent**.")
+                    st.error("Missing required columns: **Team** and **Opponent** (These are often derived but needed for GameID).")
                     return pd.DataFrame()
             
+            # --- CLEANUP & STANDARDIZE ---
+            # Set player_id from the 'Name' column
             df['player_id'] = df['Name'] 
             
+            # Clean Ownership (Handle commas, %, convert to numeric)
             df['own_proj'] = df['own_proj'].astype(str).str.replace('%', '', regex=False).str.replace(',', '.', regex=False)
             df['own_proj'] = pd.to_numeric(df['own_proj'], errors='coerce')
-            df.dropna(subset=['own_proj'], inplace=True)
+            df.dropna(subset=['own_proj', 'proj', 'salary'], inplace=True)
 
-            if df['own_proj'].max() <= 1.0:
+            # Standardize Ownership to 0-100 Scale (Whole Numbers)
+            if df['own_proj'].max() <= 1.0 and df['own_proj'].max() > 0:
                  df['own_proj'] = df['own_proj'] * 100
             
             df['own_proj'] = df['own_proj'].round(1)
 
+            # Final type conversions
             try:
-                initial_len_salary = len(df)
+                # Cleaning salary again ensures no non-numeric strings remain
                 df['salary'] = df['salary'].astype(str).str.strip().str.replace('$', '', regex=False).str.replace(',', '', regex=False)
                 df['salary'] = pd.to_numeric(df['salary'], errors='coerce').astype('Int64') 
                 df.dropna(subset=['salary'], inplace=True)
-                dropped_len_salary = initial_len_salary - len(df)
-                
-                if dropped_len_salary > 0:
-                    st.warning(f"⚠️ Dropped {dropped_len_salary} player(s) due to unfixable salary data.")
 
                 df['salary'] = df['salary'].astype(int) 
                 df['proj'] = df['proj'].astype(float)
@@ -295,15 +301,6 @@ def tab_lineup_builder(slate_df, template):
     
     if st.session_state['optimal_lineups_results'].get('ran', False):
         display_multiple_lineups(slate_df, st.session_state['optimal_lineups_results']['lineups'])
-        
-        # The download button is commented out as the export logic is complex
-        # st.download_button(
-        #     label="⬇️ Download All Lineups (CSV)",
-        #     data="Example CSV Data",
-        #     file_name="top_lineups.csv",
-        #     mime="text/csv",
-        #     disabled=True, 
-        # )
 
     else:
         st.info("Select the number of lineups and click 'Generate Top N Lineups' above to run the multi-lineup builder.")
