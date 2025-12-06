@@ -1,10 +1,109 @@
-# builder.py (Replace the existing function with this one)
+# builder.py
 
-# builder.py (Lines 1-5 should look like this)
-
-import pandas as pd  # <-- CRITICAL MISSING IMPORT
+import pandas as pd
 from pulp import *
 from typing import Dict, List, Tuple, Union
+
+# --- CONFIGURATION CONSTANTS ---
+PUNT_THR = 10.0
+CHALK_THR = 30.0
+MEGA_CHALK_THR = 40.0
+
+DEFAULT_SALARY_CAP = 50000
+DEFAULT_ROSTER_SIZE = 8
+
+# --- 1. CONTEST TEMPLATES ---
+
+DK_NBA_TEMPLATES = {
+    "ROSTER_SLOTS": {
+        "PG": 1, 
+        "SG": 1,
+        "SF": 1,
+        "PF": 1,
+        "C": 1,
+        "G": 1,  
+        "F": 1, 
+        "Util": 1
+    },
+    
+    "OWNERSHIP_TARGETS": {
+        "CASH": {
+            "punt": (0, 3),
+            "mid": (2, 6),
+            "chalk": (2, 6),
+            "mega": (0, 2)
+        },
+        "SE": {
+            "punt": (1, 4),
+            "mid": (2, 5),
+            "chalk": (1, 4),
+            "mega": (0, 2)
+        },
+        "LARGE_GPP": {
+            "punt": (2, 5),
+            "mid": (1, 4),
+            "chalk": (0, 3),
+            "mega": (0, 1)
+        }
+    }
+}
+
+# --- 2. TEMPLATE CLASS (Helper) ---
+
+class LineupTemplate:
+    """Class to hold and manage contest constraints."""
+    
+    def __init__(self, contest_type: str, roster_size: int, salary_cap: int, min_games: int):
+        self.contest_type = contest_type
+        self.contest_label = self._get_contest_label(contest_type)
+        self.roster_size = roster_size
+        self.salary_cap = salary_cap
+        self.min_games = min_games
+        self.pos_req = DK_NBA_TEMPLATES["ROSTER_SLOTS"]
+        self.own_targets = DK_NBA_TEMPLATES["OWNERSHIP_TARGETS"][contest_type]
+
+    def _get_contest_label(self, code: str) -> str:
+        """Translates contest code to a friendly label."""
+        if code == 'CASH': return "Cash Game"
+        if code == 'SE': return "Single Entry GPP"
+        if code == 'LARGE_GPP': return "Large Field GPP"
+        return "Unknown Contest"
+
+    def bucket_ranges(self, slack: int = 1) -> Dict[str, Tuple[int, int]]:
+        """Returns ownership ranges adjusted by slack (e.g., for ownership constraints)."""
+        ranges = {}
+        for bucket, (min_val, max_val) in self.own_targets.items():
+            ranges[bucket] = (max(0, min_val - slack), max_val + slack)
+        return ranges
+
+def build_template_from_params(
+    contest_type: str, 
+    field_size: int, 
+    pct_to_first: float, 
+    roster_size: int,
+    salary_cap: int,
+    min_games: int
+) -> LineupTemplate:
+    """Initializes and returns a LineupTemplate instance."""
+    return LineupTemplate(
+        contest_type=contest_type, 
+        roster_size=roster_size,
+        salary_cap=salary_cap,
+        min_games=min_games
+    )
+
+# --- 3. CORE LOGIC ---
+
+def ownership_bucket(own_proj: float) -> str:
+    """Categorizes a player based on their ownership projection."""
+    if own_proj < PUNT_THR:
+        return 'punt'
+    elif own_proj < CHALK_THR:
+        return 'mid'
+    elif own_proj < MEGA_CHALK_THR:
+        return 'chalk'
+    else:
+        return 'mega'
 
 def build_optimal_lineup(
     slate_df: pd.DataFrame, 
@@ -34,7 +133,6 @@ def build_optimal_lineup(
                              for pid in playable_df['player_id'])
     
     # B. Minimization: Penalty for violating Ownership Targets (Soft Constraint)
-    # Define variables and constraints for soft ownership limits
     own_ranges = template.bucket_ranges(slack=bucket_slack)
     penalty_sum = 0
     
@@ -54,9 +152,7 @@ def build_optimal_lineup(
         over_var = LpVariable(f"Over_{bucket}", lowBound=0)
         prob += count - over_var <= max_count, f"{bucket} Max Soft"
         
-        # Add penalty: Violating the target costs points (e.g., 50 points per violation)
-        # The penalty value (e.g., 50) must be significantly larger than any single player's projection.
-        # We use a large coefficient to ensure adherence is prioritized over marginal projection gains.
+        # Add penalty: Violating the target costs points (e.g., 500 points per violation)
         penalty_sum += 500 * under_var + 500 * over_var
 
     # 3. Final Objective Function: Maximize Projection - Penalties
@@ -86,44 +182,4 @@ def build_optimal_lineup(
     pos_map = template.pos_req
     
     pg_players = playable_df[playable_df['positions'].str.contains('PG')]['player_id'].tolist()
-    sg_players = playable_df[playable_df['positions'].str.contains('SG')]['player_id'].tolist()
-    sf_players = playable_df[playable_df['positions'].str.contains('SF')]['player_id'].tolist()
-    pf_players = playable_df[playable_df['positions'].str.contains('PF')]['player_id'].tolist()
-    c_players = playable_df[playable_df['positions'].str.contains('C')]['player_id'].tolist()
-
-    # Hard Slot Requirements
-    prob += lpSum(player_vars[pid] for pid in pg_players) >= pos_map['PG'], "PG Min"
-    prob += lpSum(player_vars[pid] for pid in sg_players) >= pos_map['SG'], "SG Min"
-    prob += lpSum(player_vars[pid] for pid in sf_players) >= pos_map['SF'], "SF Min"
-    prob += lpSum(player_vars[pid] for pid in pf_players) >= pos_map['PF'], "PF Min"
-    prob += lpSum(player_vars[pid] for pid in c_players) >= pos_map['C'], "C Min"
-    
-    # Flexible Slots (G & F)
-    prob += lpSum(player_vars[pid] for pid in set(pg_players) | set(sg_players)) >= (pos_map['PG'] + pos_map['SG'] + pos_map['G']), "G Slot Fulfillment"
-    prob += lpSum(player_vars[pid] for pid in set(sf_players) | set(pf_players)) >= (pos_map['SF'] + pos_map['PF'] + pos_map['F']), "F Slot Fulfillment"
-    
-    # E. Lock/Exclude Constraints
-    for pid in locked_player_ids:
-        if pid in player_vars:
-            prob += player_vars[pid] == 1, f"Lock Player {pid}"
-        
-    # 5. Solve the Problem
-    prob.solve()
-    
-    # 6. Process Results
-    if prob.status == LpStatusOptimal:
-        selected_players = [pid for pid in playable_df['player_id'] if player_vars[pid].varValue == 1]
-        
-        # Calculate the penalty incurred to show the user how much the template was violated
-        # Note: If penalty_sum is > 0, the lineup is VALID but non-IDEAL.
-        final_penalty = value(penalty_sum)
-        
-        # Display a warning if a soft constraint was broken
-        if final_penalty > 0.0:
-            print(f"⚠️ Optimal lineup found, but incurred a template penalty of {final_penalty / 500:.0f} violation(s) to maximize projection.")
-            
-        return slate_df[slate_df['player_id'].isin(selected_players)]
-    else:
-        # If the problem is still infeasible, it means a HARD constraint failed (Salary, Roster Size, Positions, or Min Games).
-        print("❌ CRITICAL FAILURE: Could not find a valid lineup. Check hard constraints (Salary Cap, Roster Size, Positional Minimums, Min Games).")
-        return None
+    sg_players = playable_df[playable_
