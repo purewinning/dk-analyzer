@@ -1,9 +1,10 @@
-# app.py - FINAL FIX: MAPPING TO MATCH "PROJECTED FP" AND "OWNERSHIP %"
+# app.py - FINAL FIX: ACCEPT PASTE DATA VIA TEXT AREA
 
 import pandas as pd 
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List, Tuple
+import io # Added for reading text into a DataFrame
 
 # NOTE: The 'builder' module is assumed to be correct and unchanged.
 from builder import (
@@ -41,20 +42,21 @@ CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name', 'Team',
 
 # --- 1. DATA PREPARATION ---
 
-def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
-    """Loads CSV, standardizes ownership, and processes data."""
+def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
+    """Loads CSV from a pasted string, standardizes ownership, and processes data."""
     
-    if uploaded_file is None:
+    if pasted_data is None or not pasted_data.strip():
         # Return an empty DataFrame with the expected columns for initialization
         df = pd.DataFrame(columns=CORE_INTERNAL_COLS + ['player_id', 'GameID', 'bucket', 'value', 'Lock', 'Exclude'])
         return df
         
     try:
-        df = pd.read_csv(uploaded_file)
-        st.success("✅ Data loaded successfully. Checking headers...")
+        # Read the pasted string data using io.StringIO
+        data_io = io.StringIO(pasted_data)
+        df = pd.read_csv(data_io)
+        st.success("✅ Data pasted successfully. Checking headers...")
         
         # --- CRITICAL FIX: STRIP WHITESPACE FROM ALL HEADERS ---
-        # This will remove any leading/trailing spaces from column names
         df.columns = df.columns.str.strip()
         
         # --- VALIDATE AND MAP REQUIRED COLUMNS ---
@@ -77,7 +79,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             missing_csv_names = [k for k, v in REQUIRED_CSV_TO_INTERNAL_MAP.items() if v in final_missing_internal and k in ['Player', 'Salary', 'Position', 'Team', 'Opponent', 'PROJECTED FP', 'OWNERSHIP %']]
             
             st.error(f"Missing essential headers: The following columns are missing or incorrectly named: {', '.join(set(missing_csv_names))}.")
-            st.error("Please ensure your CSV headers exactly match: Player, Salary, Position, Team, Opponent, PROJECTED FP, OWNERSHIP %.")
+            st.error("Please ensure your pasted data's first row (headers) exactly matches: Player, Salary, Position, Team, Opponent, PROJECTED FP, OWNERSHIP %.")
             return pd.DataFrame()
 
         # Rename columns using the filtered, actual map
@@ -90,7 +92,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
 
         
     except Exception as e:
-        st.error(f"Error processing uploaded file: {e}")
+        st.error(f"Error processing pasted data: {e}")
         return pd.DataFrame()
 
 
@@ -314,7 +316,7 @@ def tab_lineup_builder(slate_df, template):
     # Ensure the dataframe for the editor is not empty, otherwise the table fails to render headers
     if df_for_editor.empty:
         # Create a blank DataFrame with the correct columns (excluding internal-only ones)
-        st.info("⬆️ Please upload your CSV file using the sidebar to populate the player pool.")
+        st.info("✍️ Paste your player data into the text area in the sidebar and click the button to load the pool.")
         
         blank_df = pd.DataFrame(columns=column_order)
         edited_df = st.data_editor(
@@ -423,7 +425,7 @@ def tab_contest_analyzer(slate_df, template):
     st.header("Contest Strategy Analyzer")
     
     if slate_df.empty:
-        st.info("⬆️ Please upload your CSV file using the sidebar to view the contest analyzer.")
+        st.info("✍️ Paste your data into the sidebar text area to view the contest analyzer.")
         return
 
     st.info(f"Analysis based on: **{template.contest_label}**")
@@ -458,29 +460,4 @@ if __name__ == '__main__':
         st.caption("Maximize Projection based on Template")
         contest_type = st.selectbox("Contest Strategy", ['GPP (Single Entry)', 'GPP (Large Field)', 'CASH'])
         
-        c_map = {'GPP (Single Entry)': 'SE', 'GPP (Large Field)': 'LARGE_GPP', 'CASH': 'CASH'}
-        contest_code = c_map[contest_type]
-        
-        st.divider()
-        uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
-        
-    # Load Data
-    slate_df = load_and_preprocess_data(uploaded_file)
-        
-    # Build Template
-    template = build_template_from_params(
-        contest_type=contest_code, 
-        field_size=10000, 
-        pct_to_first=30.0,
-        roster_size=DEFAULT_ROSTER_SIZE,
-        salary_cap=DEFAULT_SALARY_CAP,
-        min_games=MIN_GAMES_REQUIRED
-    )
-
-    # Tabs
-    t1, t2 = st.tabs(["✨ Optimal Lineup Builder", "📝 Contest Analyzer"])
-    
-    with t1:
-        tab_lineup_builder(slate_df, template)
-    with t2:
-        tab_contest_analyzer(slate_df, template)
+        c_map = {'GPP (Single Entry)': 'SE', 'GPP
