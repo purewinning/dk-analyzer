@@ -182,3 +182,165 @@ def optimize_single_lineup(
     for gid in game_ids:
         game_players = playable_df[playable_df['GameID'] == gid]['player_id'].tolist()
         prob += lpSum(player_vars[pid] for pid in game_players) <= len(game_players) * game_vars[gid], f"Game Active {gid}"
+    
+    prob += lpSum(game_vars[gid] for gid in game_ids) >= template.min_games, "Minimum Games"
+
+    # D. Positional Constraints
+    pos_map = template.pos_req
+    
+    pg_players = playable_df[playable_df['positions'].str.contains('PG')]['player_id'].tolist()
+    sg_players = playable_df[playable_df['positions'].str.contains('SG')]['player_id'].tolist()
+    sf_players = playable_df[playable_df['positions'].str.contains('SF')]['player_id'].tolist()
+    pf_players = playable_df[playable_df['positions'].str.contains('PF')]['player_id'].tolist()
+    c_players = playable_df[playable_df['positions'].str.contains('C')]['player_id'].tolist()
+
+    prob += lpSum(player_vars[pid] for pid in pg_players) >= pos_map['PG'], "PG Min"
+    prob += lpSum(player_vars[pid] for pid in sg_players) >= pos_map['SG'], "SG Min"
+    prob += lpSum(player_vars[pid] for pid in sf_players) >= pos_map['SF'], "SF Min"
+    prob += lpSum(player_vars[pid] for pid in pf_players) >= pos_map['PF'], "PF Min"
+    prob += lpSum(player_vars[pid] for pid in c_players) >= pos_map['C'], "C Min"
+    
+    prob += lpSum(player_vars[pid] for pid in set(pg_players) | set(sg_players)) >= (pos_map['PG'] + pos_map['SG'] + pos_map['G']), "G Slot Fulfillment"
+    prob += lpSum(player_vars[pid] for pid in set(sf_players) | set(pf_players)) >= (pos_map['SF'] + pos_map['PF'] + pos_map['F']), "F Slot Fulfillment"
+    
+    # E. Lock/Exclude Constraints
+    for pid in locked_player_ids:
+        if pid in player_vars:
+            prob += player_vars[pid] == 1, f"Lock Player {pid}"
+        
+    # 5. Solve the Problem
+    prob.solve(PULP_CBC_CMD(msg=0)) # Suppress output
+
+    # 6. Process Results
+    if prob.status == LpStatusOptimal:
+        selected_players = [pid for pid in playable_df['player_id'] if player_vars[pid].varValue == 1]
+        
+        # Return only the list of player IDs (for efficient MCS collection)
+        return selected_players
+    else:
+        return None
+
+def run_monte_carlo_simulations(
+    slate_df: pd.DataFrame, 
+    template: 'LineupTemplate', 
+    num_iterations: int,
+    max_exposures: Dict[str, float],
+    bucket_slack: int,
+    locked_player_ids: List[str], 
+    excluded_player_ids: List[str],
+    min_lineup_diversity: int = 4
+) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    """
+    Runs Monte Carlo simulations, collects optimal lineups, and applies 
+    Max Exposure and Lineup Diversity constraints.
+    Returns: (list of final lineups (dicts), dict of player exposures)
+    """
+    
+    raw_optimal_lineups = []
+    sim_df = slate_df.copy()
+    
+    # --- CRITICAL FIX: ENSURE ALL NUMERICAL COLUMNS ARE FLOAT ---
+    try:
+        sim_df['proj'] = sim_df['proj'].values.astype(np.float64) 
+        sim_df['salary'] = sim_df['salary'].values.astype(np.float64)
+    except Exception as e:
+        print(f"ERROR: Final float conversion failed in builder.py: {e}") 
+        return [], {}
+    
+    # 1. PRE-CALCULATE STATISTICAL VARIANCE
+    sim_df['std_dev'] = sim_df['proj'] * DEFAULT_STD_DEV_PCT
+    
+    # Ensure players with 0 salary/proj/std_dev are safe
+    sim_df.loc[sim_df['std_dev'] <= 0, 'std_dev'] = 0.1
+    sim_df.loc[sim_df['proj'] <= 0, 'proj'] = 0.1
+    
+    # 2. RUN SIMULATIONS
+    for i in range(num_iterations):
+        
+        # REINFORCED STABILITY: Explicitly cast to float for NumPy and use .values.
+        loc_values = sim_df['proj'].values.astype(float)
+        scale_values = sim_df['std_dev'].values.astype(float)
+        
+        # Sample new projections N(mu, sigma)
+        sampled_values = np.random.normal(
+            loc=loc_values, 
+            scale=scale_values,
+            size=len(sim_df)
+        )
+        
+        # Apply the clip operation separately to prevent the C recursion crash
+        sim_df['sampled_proj'] = sampled_values.clip(lower=0.1)
+        
+        # Create a temporary DF with sampled proj as the primary 'proj' column
+        temp_df = sim_df.rename(columns={'sampled_proj': 'proj'})
+
+        lineup_ids = optimize_single_lineup(
+            slate_df=temp_df,
+            template=template,
+            bucket_slack=bucket_slack,
+            locked_player_ids=locked_player_ids,
+            excluded_player_ids=excluded_player_ids
+        )
+        
+        if lineup_ids:
+            lineup_proj = temp_df[temp_df['player_id'].isin(lineup_ids)]['proj'].sum()
+            
+            raw_optimal_lineups.append({
+                'player_ids': lineup_ids,
+                'proj_score': lineup_proj
+            })
+
+    # --- 3. POST-SIMULATION ANALYSIS & FILTERING ---
+    
+    if not raw_optimal_lineups:
+        return [], {}
+
+    raw_optimal_lineups.sort(key=lambda x: x['proj_score'], reverse=True)
+    
+    final_lineups = []
+    player_counts = {pid: 0 for pid in slate_df['player_id']}
+    max_output_lineups = min(len(raw_optimal_lineups), 100) 
+    
+    
+    for lineup in raw_optimal_lineups:
+        lineup_ids = lineup['player_ids']
+        
+        # A. Check Max Exposure Constraint
+        violates_exposure = False
+        for pid in lineup_ids:
+            current_total = len(final_lineups)
+            current_count = player_counts.get(pid, 0)
+            max_pct = max_exposures.get(pid, 1.0) 
+            
+            if (current_count + 1) / (current_total + 1e-9) > max_pct:
+                violates_exposure = True
+                break
+        
+        if violates_exposure:
+            continue
+
+        # B. Check Lineup Diversity Constraint
+        is_diverse = True
+        for existing_lineup in final_lineups:
+            shared_count = len(set(lineup_ids) & set(existing_lineup['player_ids']))
+            if shared_count > min_lineup_diversity:
+                is_diverse = False
+                break
+        
+        if is_diverse:
+            final_lineups.append(lineup)
+            
+            for pid in lineup_ids:
+                player_counts[pid] = player_counts.get(pid, 0) + 1
+            
+            if len(final_lineups) >= max_output_lineups:
+                break
+    
+    total_lineups_count = len(final_lineups)
+    
+    final_exposures = {
+        pid: (count / total_lineups_count) * 100 if total_lineups_count > 0 else 0
+        for pid, count in player_counts.items() 
+    }
+    
+    return final_lineups, final_exposures
