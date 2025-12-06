@@ -112,45 +112,4 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             'Name': [f'Player {i}' for i in range(1, 15)],
             'positions': ['PG/SG', 'PG', 'SG', 'SF', 'PF/C', 'PF', 'C', 'PG/SF', 'SG/PF', 'C', 'PG', 'SF', 'PF', 'SG'],
             'salary': [6000, 7000, 5000, 8000, 4500, 4000, 9000, 5500, 6500, 4200, 7500, 8500, 4800, 5200],
-            'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22.1, 50.3, 32.7, 38.0, 20.9, 42.0, 48.0, 28.0, 31.0], # Full list
-            'own_proj': [45.0, 35.0, 15.0, 28.0, 5.0, 8.0, 40.0, 12.0, 20.0, 9.0, 33.0, 18.0, 4.0, 16.0], 
-            'Team': ['LAL', 'LAL', 'BOS', 'BOS', 'MIL', 'MIL', 'PHX', 'PHX', 'DEN', 'DEN', 'LAL', 'BOS', 'MIL', 'PHX'],
-            'Opponent': ['BOS', 'BOS', 'LAL', 'LAL', 'DEN', 'DEN', 'MIL', 'MIL', 'PHX', 'PHX', 'BOS', 'LAL', 'DEN', 'MIL'],
-            'GameID': [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 1, 2, 3, 4]
-        }
-        df = pd.DataFrame(data)
-        st.warning("⚠️ Using placeholder data. Upload your CSV for real analysis.")
-
-    # Assign Buckets (Now using 0-100 scale logic)
-    df['bucket'] = df['own_proj'].apply(ownership_bucket)
-    
-    # Initialize UI Control Columns
-    if 'Lock' not in df.columns: df['Lock'] = False
-    if 'Exclude' not in df.columns: df['Exclude'] = False
-    
-    return df
-
-# --- 2. HELPER: RANDOMIZE PROJECTIONS ---
-def apply_variance(df, variance_pct):
-    """Applies random variance to projections."""
-    df_varied = df.copy()
-    rng = np.random.default_rng()
-    noise = rng.uniform(1 - (variance_pct/100), 1 + (variance_pct/100), size=len(df))
-    df_varied['proj'] = df_varied['proj'] * noise
-    return df_varied
-
-# --- 3. TAB FUNCTIONS ---
-
-def tab_lineup_builder(slate_df, template):
-    """Render the Interactive Lineup Builder."""
-    st.header("1. Player Pool & Constraints")
-    
-    # --- A. PLAYER POOL EDITOR ---
-    st.markdown("Use the table below to **Lock** (Force In), **Exclude** (Ban), or **Edit** projections.")
-    
-    # Define column config for the editor
-    column_config = {
-        "Name": st.column_config.TextColumn("Player Name", disabled=True),
-        "positions": st.column_config.TextColumn("Pos", disabled=True),
-        "salary": st.column_config.NumberColumn("Salary", format="$%d"),
-        "proj": st.column
+            'proj': [35.5, 40.2, 30.1, 45.8, 25.0, 22
