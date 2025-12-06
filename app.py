@@ -3,11 +3,12 @@
 import pandas as pd 
 import numpy as np
 import streamlit as st 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 # Ensure this import block is perfectly copied
 from builder import (
     build_template_from_params, 
-    build_optimal_lineup, 
+    run_monte_carlo_simulations, # <-- NEW IMPORT
+    optimize_single_lineup, # <-- NEW IMPORT
     ownership_bucket,
     PUNT_THR, CHALK_THR, MEGA_CHALK_THR,
     DEFAULT_SALARY_CAP, DEFAULT_ROSTER_SIZE
@@ -15,6 +16,8 @@ from builder import (
 
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
+DEFAULT_ITERATIONS = 500
+DEFAULT_DIVERSITY = 4 # Max shared players in any two final lineups
 
 # --- HEADER MAPPING ---
 REQUIRED_CSV_TO_INTERNAL_MAP = {
@@ -128,43 +131,58 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
     # Initialize UI Control Columns
     if 'Lock' not in df.columns: df['Lock'] = False
     if 'Exclude' not in df.columns: df['Exclude'] = False
+    if 'Max_Exposure' not in df.columns: df['Max_Exposure'] = 100 # Default to 100%
     
     return df
 
-# --- 2. HELPER: RANDOMIZE PROJECTIONS ---
-def apply_variance(df, variance_pct):
-    """Applies random variance to projections."""
-    df_varied = df.copy()
-    rng = np.random.default_rng()
-    noise = rng.uniform(1 - (variance_pct/100), 1 + (variance_pct/100), size=len(df))
-    df_varied['proj'] = df_varied['proj'] * noise
-    return df_varied
+# --- 2. HELPER: RANDOMIZE PROJECTIONS (No longer needed, replaced by MCS) ---
 
 # --- 3. TAB FUNCTIONS ---
 
+# Use session state to store simulation results
+if 'sim_results' not in st.session_state:
+    st.session_state['sim_results'] = {'lineups': [], 'exposures': {}}
+if 'edited_df' not in st.session_state:
+    st.session_state['edited_df'] = pd.DataFrame()
+
+
 def tab_lineup_builder(slate_df, template):
-    """Render the Interactive Lineup Builder."""
+    """Render the Interactive Lineup Builder and run MCS."""
     st.header("1. Player Pool & Constraints")
     
     # --- A. PLAYER POOL EDITOR ---
-    st.markdown("Use the table below to **Lock** (Force In), **Exclude** (Ban), or **Edit** projections.")
+    st.markdown("Use the table to **Lock**, **Exclude**, or set **Max Exposure** for Monte Carlo.")
     
     # Define column config for the editor (CONDENSED)
-    column_config = {"Name": st.column_config.TextColumn("Player Name", disabled=True), "positions": st.column_config.TextColumn("Pos", disabled=True), "salary": st.column_config.NumberColumn("Salary", format="$%d"), "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), "player_id": None, "GameID": None, "Team": None, "Opponent": None}
+    column_config = {
+        "Name": st.column_config.TextColumn("Player Name", disabled=True), 
+        "positions": st.column_config.TextColumn("Pos", disabled=True), 
+        "salary": st.column_config.NumberColumn("Salary", format="$%d"), 
+        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), 
+        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), 
+        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), 
+        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), 
+        "Max_Exposure": st.column_config.NumberColumn("Max Exposure (%)", min_value=0, max_value=100, default=100, format="%d%%", help="Max % of final lineups player can appear in."),
+        "player_id": None, "GameID": None, "Team": None, "Opponent": None
+    }
     
     # The Interactive Data Editor
     edited_df = st.data_editor(
-        slate_df[['Lock', 'Exclude', 'Name', 'positions', 'salary', 'proj', 'own_proj', 'Team', 'Opponent', 'GameID', 'player_id']],
+        slate_df[['Lock', 'Exclude', 'Max_Exposure', 'Name', 'positions', 'salary', 'proj', 'own_proj', 'Team', 'Opponent', 'GameID', 'player_id']],
         column_config=column_config,
         hide_index=True,
         use_container_width=True,
         height=400,
         key="player_editor"
     )
+    st.session_state['edited_df'] = edited_df
     
-    # Extract Locks and Excludes
+    # Extract Constraints
     locked_players = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
     excluded_players = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
+    
+    # Create Max Exposure Dictionary (converted to 0.0 to 1.0 for the builder)
+    max_exposures = edited_df.set_index('player_id')['Max_Exposure'].div(100).to_dict()
     
     if locked_players or excluded_players:
         st.caption(f"🔒 **Locked:** {len(locked_players)} | ❌ **Excluded:** {len(excluded_players)}")
@@ -172,79 +190,152 @@ def tab_lineup_builder(slate_df, template):
     st.markdown("---")
     
     # --- B. SIMULATION SETTINGS ---
-    st.header("2. Generate Optimal Lineup")
+    st.header("2. Run Monte Carlo Simulation")
     
-    col_var, col_btn = st.columns([2, 1])
-    with col_var:
-        variance = st.slider("Randomize Projections (+/- %)", 0, 30, 0, help="Add randomness to 'simulate' a slate outcomes.")
+    col_iter, col_div, col_btn = st.columns([2, 2, 1])
+    
+    with col_iter:
+        iterations = st.number_input("Simulation Iterations (Higher is better)", 
+                                     min_value=100, max_value=5000, value=DEFAULT_ITERATIONS, step=100)
+    
+    with col_div:
+        diversity = st.number_input("Lineup Diversity (Max Shared Players)", 
+                                    min_value=1, max_value=7, value=DEFAULT_DIVERSITY, 
+                                    help="Maximum number of shared players allowed between any two final lineups.")
     
     with col_btn:
         st.write("") # Spacer
-        run_btn = st.button("🚀 Build Lineup", use_container_width=True)
+        run_btn = st.button("🚀 Run Simulation", use_container_width=True)
     
     if run_btn:
-        # Apply variance if requested
         final_df = edited_df.copy()
-        if variance > 0:
-            final_df = apply_variance(final_df, variance)
-            st.toast(f"Applied +/- {variance}% variance to projections.")
-            
+        
         # Recalculate buckets based on potentially edited ownership
         final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
+        
+        # Check for Lock/Exclude conflicts
+        conflict = set(locked_players) & set(excluded_players)
+        if conflict:
+            st.error(f"❌ CONFLICT: Player(s) {', '.join(conflict)} are both locked and excluded.")
+            return
 
-        with st.spinner(f'Optimizing...'):
-            optimal_lineup_df = build_optimal_lineup(
+        with st.spinner(f'Running {iterations} Monte Carlo simulations...'):
+            final_lineups, final_exposures = run_monte_carlo_simulations(
                 slate_df=final_df,
                 template=template,
+                num_iterations=iterations,
+                max_exposures=max_exposures,
                 bucket_slack=1,
                 locked_player_ids=locked_players,
-                excluded_player_ids=excluded_players
+                excluded_player_ids=excluded_players,
+                min_lineup_diversity=diversity
             )
         
-        if optimal_lineup_df is not None:
-            total_salary = optimal_lineup_df['salary'].sum()
-            total_points = optimal_lineup_df['proj'].sum()
-            games_used = optimal_lineup_df['GameID'].nunique()
-            
-            st.success("### 🏆 Optimal Lineup Found")
-
-            # --- START: LINEUP FORMATTING LOGIC ---
-            
-            ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-            
-            # This is a temporary fix for display: Assign 8 positions to the 8 players selected
-            optimal_lineup_df = optimal_lineup_df.head(8).assign(
-                roster_position=ROSTER_ORDER
-            )
-
-            # 2. Sort the DataFrame by the custom position order
-            position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
-            optimal_lineup_df['roster_position'] = optimal_lineup_df['roster_position'].astype(position_type)
-            optimal_lineup_df.sort_values(by='roster_position', inplace=True)
-            
-            # 3. Define display columns (now including the new roster_position)
-            display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-            lineup_df_display = optimal_lineup_df[display_cols].reset_index(drop=True)
-            
-            # 4. Rename the column for display
-            lineup_df_display.rename(columns={'roster_position': 'SLOT'}, inplace=True)
-            
-            # --- END: LINEUP FORMATTING LOGIC ---
-            
-            # Format dataframe for pretty display
-            st.dataframe(
-                lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "own_proj": "{:.1f}%"}),
-                use_container_width=True,
-                hide_index=True 
-            )
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Projection", f"{total_points:.2f}")
-            col2.metric("Salary Used", f"${total_salary:,}")
-            col3.metric("Games", f"{games_used}")
-            
+        st.session_state['sim_results'] = {
+            'lineups': final_lineups, 
+            'exposures': final_exposures,
+            'ran': True
+        }
+        
+        if final_lineups:
+            st.success(f"✅ Simulation complete! Found {len(final_lineups)} diverse, optimal lineups.")
         else:
-            st.error("❌ CRITICAL FAILURE: Check hard constraints (Salary Cap, Roster Size, Positional Minimums, Min Games).")
+            st.warning("⚠️ No valid lineups found. Check your hard constraints (Locks, Excludes, Salary).")
+            st.session_state['sim_results']['ran'] = False
+
+def tab_simulation_results(slate_df):
+    """Render the results of the Monte Carlo Simulation."""
+    if st.session_state['sim_results'].get('ran', False) and st.session_state['sim_results']['lineups']:
+        st.header("3. Monte Carlo Simulation Results")
+        
+        final_lineups = st.session_state['sim_results']['lineups']
+        final_exposures = st.session_state['sim_results']['exposures']
+        edited_df = st.session_state['edited_df']
+        
+        st.subheader(f"Player Exposure ({len(final_lineups)} Lineups)")
+
+        # --- A. EXPOSURE TABLE ---
+        exposure_df = edited_df[['Name', 'positions', 'proj', 'own_proj', 'Max_Exposure', 'player_id']].copy()
+        exposure_df['Exposure_Pct'] = exposure_df['player_id'].map(final_exposures).fillna(0).round(1)
+        
+        # Calculate Over-Exposed/Under-Exposed Status
+        exposure_df['Status'] = np.where(
+            (exposure_df['Exposure_Pct'] > exposure_df['Max_Exposure']) & (exposure_df['Max_Exposure'] < 100), 
+            '🚨 Over-Exposed', 
+            '✅ OK'
+        )
+        
+        exposure_df.sort_values(by='Exposure_Pct', ascending=False, inplace=True)
+        
+        exposure_df_display = exposure_df[['Name', 'positions', 'proj', 'own_proj', 'Max_Exposure', 'Exposure_Pct', 'Status']]
+        
+        st.dataframe(
+            exposure_df_display.style.format({
+                "proj": "{:.1f}", 
+                "own_proj": "{:.1f}%", 
+                "Max_Exposure": "{:.0f}%", 
+                "Exposure_Pct": "{:.1f}%"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.markdown("---")
+        st.subheader("Generated Lineups (Highest Projection First)")
+
+        # --- B. LINEUP DISPLAY ---
+        
+        # User selection for lineup
+        lineup_index = st.selectbox("Select Lineup #", 
+                                    options=list(range(1, len(final_lineups) + 1)), 
+                                    format_func=lambda x: f"Lineup {x} (Proj: {final_lineups[x-1]['proj_score']:.2f})")
+        
+        selected_lineup_data = final_lineups[lineup_index - 1]
+        selected_lineup_ids = selected_lineup_data['player_ids']
+        
+        # Rebuild the dataframe for display
+        lineup_df = slate_df[slate_df['player_id'].isin(selected_lineup_ids)].copy()
+        
+        # 1. Assign Roster Position
+        ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+        
+        # Match players to their required primary slot (this is still a HACK for display)
+        # For a truly accurate display, the solver must return the assigned slot.
+        # This implementation simply assigns the slots in order of the ROSTER_ORDER list.
+        lineup_df = lineup_df.head(8).assign(roster_position=ROSTER_ORDER)
+
+        # 2. Sort the DataFrame by the custom position order
+        position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
+        lineup_df['roster_position'] = lineup_df['roster_position'].astype(position_type)
+        lineup_df.sort_values(by='roster_position', inplace=True)
+        
+        # 3. Define display columns
+        display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+        lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
+        
+        # 4. Rename the column for display
+        lineup_df_display.rename(columns={'roster_position': 'SLOT'}, inplace=True)
+        
+        # Display Metrics
+        total_salary = lineup_df['salary'].sum()
+        total_points = lineup_df['proj'].sum()
+        games_used = lineup_df['GameID'].nunique()
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Projection", f"{total_points:.2f}")
+        col2.metric("Salary Used", f"${total_salary:,}")
+        col3.metric("Games", f"{games_used}")
+        
+        # Display Lineup
+        st.dataframe(
+            lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "own_proj": "{:.1f}%"}),
+            use_container_width=True,
+            hide_index=True 
+        )
+
+    else:
+        st.info("Run the simulation on the 'Lineup Builder' tab first to see results here.")
+
 
 def tab_contest_analyzer(slate_df, template):
     """Render the Contest Analyzer."""
@@ -277,7 +368,8 @@ if __name__ == '__main__':
     
     # Sidebar
     with st.sidebar:
-        st.title("🏀 DK Builder")
+        st.title("🏀 DK Lineup Sim")
+        st.caption("Monte Carlo & Max Exposure")
         contest_type = st.selectbox("Contest Strategy", ['GPP (Single Entry)', 'GPP (Large Field)', 'CASH'])
         
         # Map selection
@@ -303,9 +395,11 @@ if __name__ == '__main__':
     )
 
     # Tabs
-    t1, t2 = st.tabs(["🚀 Lineup Builder", "📊 Contest Analyzer"])
+    t1, t2, t3 = st.tabs(["🚀 Lineup Builder & Sim", "📊 Exposure & Results", "📝 Contest Analyzer"])
     
     with t1:
         tab_lineup_builder(slate_df, template)
     with t2:
+        tab_simulation_results(slate_df)
+    with t3:
         tab_contest_analyzer(slate_df, template)
