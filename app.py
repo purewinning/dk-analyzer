@@ -42,12 +42,12 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             
             missing_csv_cols = [col for col in REQUIRED_CSV_TO_INTERNAL_MAP.keys() if col not in df.columns]
             if missing_csv_cols:
-                st.error(f"Missing headers: {missing_csv_cols}")
+                st.error(f"Missing headers: {missing_csv_cols}. Required: {list(REQUIRED_CSV_TO_INTERNAL_MAP.keys())}")
                 return pd.DataFrame()
             
             df.rename(columns=REQUIRED_CSV_TO_INTERNAL_MAP, inplace=True)
             
-            # Create GameID
+            # Create GameID (Requires Team and Opponent columns)
             required_game_cols = ['Team', 'Opponent']
             if 'GameID' not in df.columns:
                 if all(col in df.columns for col in required_game_cols):
@@ -106,7 +106,7 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             st.error(f"Error processing file: {e}")
             return pd.DataFrame()
     else:
-        # --- Placeholder Data ---
+        # --- Placeholder Data (VERIFIED) ---
         data = {
             'player_id': [f'P{i}' for i in range(1, 15)],
             'Name': [f'Player {i}' for i in range(1, 15)],
@@ -148,7 +148,7 @@ def tab_lineup_builder(slate_df, template):
     # --- A. PLAYER POOL EDITOR ---
     st.markdown("Use the table below to **Lock** (Force In), **Exclude** (Ban), or **Edit** projections.")
     
-    # Define column config for the editor
+    # Define column config for the editor (CONDENSED)
     column_config = {"Name": st.column_config.TextColumn("Player Name", disabled=True), "positions": st.column_config.TextColumn("Pos", disabled=True), "salary": st.column_config.NumberColumn("Salary", format="$%d"), "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f"), "own_proj": st.column_config.NumberColumn("Own %", format="%.1f"), "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup"), "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup"), "player_id": None, "GameID": None}
     
     # The Interactive Data Editor
@@ -192,7 +192,6 @@ def tab_lineup_builder(slate_df, template):
         final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
 
         with st.spinner(f'Optimizing...'):
-            # VERIFIED: The parenthesis is now closed
             optimal_lineup_df = build_optimal_lineup(
                 slate_df=final_df,
                 template=template,
