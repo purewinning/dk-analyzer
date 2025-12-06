@@ -90,15 +90,24 @@ TOURNAMENT_OWNERSHIP_TEMPLATES = {
     }
 }
 
-# Entry fee tiers and their typical field sizes
+# Entry fee tiers and their typical field sizes (REAL DRAFTKINGS DATA)
 ENTRY_FEE_TIERS = {
-    "$0.25": {"min_field": 100, "max_field": 10000, "skill_level": "Beginner"},
-    "$1": {"min_field": 500, "max_field": 50000, "skill_level": "Recreational"},
-    "$3": {"min_field": 1000, "max_field": 100000, "skill_level": "Intermediate"},
-    "$5": {"min_field": 2000, "max_field": 150000, "skill_level": "Intermediate"},
-    "$10": {"min_field": 3000, "max_field": 200000, "skill_level": "Advanced"},
-    "$20": {"min_field": 5000, "max_field": 300000, "skill_level": "Advanced"},
-    "$50+": {"min_field": 10000, "max_field": 500000, "skill_level": "Expert/Shark"}
+    "$0.25": {"min_field": 100, "max_field": 2500, "skill_level": "Beginner"},
+    "$1": {"min_field": 100, "max_field": 5000, "skill_level": "Recreational"},
+    "$3": {"min_field": 500, "max_field": 10000, "skill_level": "Intermediate"},
+    "$5": {"min_field": 500, "max_field": 25000, "skill_level": "Intermediate"},
+    "$10": {"min_field": 1000, "max_field": 50000, "skill_level": "Advanced"},
+    "$20": {"min_field": 2000, "max_field": 100000, "skill_level": "Advanced"},
+    "$50+": {"min_field": 5000, "max_field": 200000, "skill_level": "Expert/Shark"}
+}
+
+# Common DraftKings contest sizes
+COMMON_CONTEST_SIZES = {
+    "Single Entry": [500, 1000, 2500, 5000],
+    "3-Max": [1000, 2500, 5000, 10000],
+    "20-Max": [5000, 10000, 25000, 50000],
+    "Large Field": [50000, 100000, 150000, 200000],
+    "Cash": [100, 500, 1000, 2500]
 }
 
 # --- HEADER MAPPING ---
@@ -410,6 +419,9 @@ def display_multiple_lineups(slate_df, template, lineup_list):
         st.warning("Try loosening your constraints or reducing the number of lineups requested.")
         return
     
+    # Check if we have actual results
+    has_actuals = st.session_state.get('has_actuals', False)
+    
     best_lineup_data = lineup_list[0]
     best_proj = best_lineup_data['proj_score']
     
@@ -417,16 +429,36 @@ def display_multiple_lineups(slate_df, template, lineup_list):
     best_salary = best_lineup_players_df['salary'].sum()
     best_value = best_proj / (best_salary / 1000) if best_salary else 0
     
+    # Calculate actual score if available
+    if has_actuals and 'actual_pts' in best_lineup_players_df.columns:
+        best_actual = best_lineup_players_df['actual_pts'].sum()
+        has_lineup_actuals = best_lineup_players_df['actual_pts'].notna().all()
+    else:
+        has_lineup_actuals = False
+    
     st.subheader("🚀 Top Lineup Metrics (Lineup 1)")
 
-    col1, col2, col3 = st.columns(3)
+    if has_lineup_actuals:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(label="Projected Points", value=f"{best_proj:.2f}")
+        with col2:
+            st.metric(label="Actual Points", value=f"{best_actual:.2f}", delta=f"{best_actual - best_proj:+.2f}")
+        with col3:
+            st.metric(label="Salary Used", value=f"${best_salary:,}")
+        with col4:
+            actual_value = best_actual / (best_salary / 1000) if best_salary else 0
+            st.metric(label="Actual Value", value=f"{actual_value:.2f}x", delta=f"{actual_value - best_value:+.2f}x")
+    else:
+        col1, col2, col3 = st.columns(3)
 
-    with col1:
-        st.metric(label="Total Projected Points", value=f"{best_proj:.2f}", delta="Optimal Lineup Score")
-    with col2:
-        st.metric(label="Salary Used", value=f"${best_salary:,}", delta=f"${template.salary_cap - best_salary:,} Remaining")
-    with col3:
-        st.metric(label="Projection Value (X)", value=f"{best_value:.2f}", delta="Points per $1,000")
+        with col1:
+            st.metric(label="Total Projected Points", value=f"{best_proj:.2f}", delta="Optimal Lineup Score")
+        with col2:
+            st.metric(label="Salary Used", value=f"${best_salary:,}", delta=f"${template.salary_cap - best_salary:,} Remaining")
+        with col3:
+            st.metric(label="Projection Value (X)", value=f"{best_value:.2f}", delta="Points per $1,000")
 
     st.markdown("---") 
 
@@ -436,16 +468,49 @@ def display_multiple_lineups(slate_df, template, lineup_list):
     
     for i, lineup_data in enumerate(lineup_list):
         lineup_players_df = slate_df[slate_df['player_id'].isin(lineup_data['player_ids'])]
-        summary_data.append({
+        
+        summary_row = {
             'Lineup': i + 1,
-            'Total Proj': lineup_data['proj_score'],
+            'Projected': lineup_data['proj_score'],
             'Salary Used': lineup_players_df['salary'].sum(),
             'Games Used': lineup_players_df['GameID'].nunique()
-        })
+        }
+        
+        # Add actual score if available
+        if has_actuals and 'actual_pts' in lineup_players_df.columns:
+            if lineup_players_df['actual_pts'].notna().all():
+                actual_score = lineup_players_df['actual_pts'].sum()
+                summary_row['Actual'] = actual_score
+                summary_row['Diff'] = actual_score - lineup_data['proj_score']
+        
+        summary_data.append(summary_row)
         
     summary_df = pd.DataFrame(summary_data).set_index('Lineup')
     
-    st.dataframe(summary_df.style.format({"Total Proj": "{:.2f}", "Salary Used": "${:,}"}), use_container_width=True)
+    # Format based on whether we have actuals
+    if 'Actual' in summary_df.columns:
+        # Sort by actual score if available
+        summary_df = summary_df.sort_values('Actual', ascending=False)
+        summary_df['Rank'] = range(1, len(summary_df) + 1)
+        
+        st.dataframe(
+            summary_df.style.format({
+                "Projected": "{:.2f}",
+                "Actual": "{:.2f}",
+                "Diff": "{:+.2f}",
+                "Salary Used": "${:,}"
+            }),
+            use_container_width=True
+        )
+        
+        # Show which lineup actually won
+        best_actual_idx = summary_df['Actual'].idxmax()
+        st.success(f"🏆 **Lineup {best_actual_idx} actually scored the most**: {summary_df.loc[best_actual_idx, 'Actual']:.2f} points!")
+    else:
+        st.dataframe(
+            summary_df.style.format({"Projected": "{:.2f}", "Salary Used": "${:,}"}), 
+            use_container_width=True
+        )
     
     st.subheader("🔎 Lineup Detail View")
     
@@ -469,28 +534,93 @@ def display_multiple_lineups(slate_df, template, lineup_list):
     lineup_df['roster_slot'] = lineup_df['roster_slot'].astype(position_type)
     lineup_df.sort_values(by='roster_slot', inplace=True)
     
-    display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM'] 
+    # Choose columns based on whether we have actuals
+    if has_actuals and 'actual_pts' in lineup_df.columns and lineup_df['actual_pts'].notna().all():
+        display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'actual_pts', 'value', 'own_proj', 'actual_own', 'bucket']
+        lineup_df['pts_diff'] = lineup_df['actual_pts'] - lineup_df['proj']
+    else:
+        display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 'salary', 'proj', 'value', 'own_proj', 'bucket', 'Minutes', 'FPPM']
+    
     lineup_df_display = lineup_df[display_cols].reset_index(drop=True)
     
-    lineup_df_display.rename(columns={
+    # Rename columns
+    rename_dict = {
         'roster_slot': 'SLOT', 
         'positions': 'POS', 
-        'own_proj': 'OWN%', 
-        'Minutes': 'MIN', 
-        'FPPM': 'FP/M', 
+        'own_proj': 'Proj Own%',
         'bucket': 'CATEGORY'
-    }, inplace=True)
+    }
     
-    styled_lineup_df = lineup_df_display.style.applymap(color_bucket, subset=['CATEGORY']).format({
-        "salary": "${:,}", 
-        "proj": "{:.1f}", 
-        "value": "{:.2f}", 
-        "OWN%": "{:.1f}%", 
-        "MIN": "{:.1f}", 
-        "FP/M": "{:.2f}"
-    })
+    if 'actual_pts' in display_cols:
+        rename_dict.update({
+            'proj': 'Proj Pts',
+            'actual_pts': 'Actual Pts',
+            'actual_own': 'Actual Own%'
+        })
+    else:
+        rename_dict.update({
+            'proj': 'Proj Pts',
+            'Minutes': 'MIN',
+            'FPPM': 'FP/M'
+        })
     
-    st.dataframe(styled_lineup_df, use_container_width=True, hide_index=True)
+    lineup_df_display.rename(columns=rename_dict, inplace=True)
+    
+    # Style the lineup
+    def color_diff(val):
+        if isinstance(val, (int, float)):
+            if val > 5:
+                return 'background-color: #90EE90'
+            elif val < -5:
+                return 'background-color: #FFB6C6'
+        return ''
+    
+    styled_lineup = lineup_df_display.style.applymap(color_bucket, subset=['CATEGORY'])
+    
+    if 'pts_diff' in lineup_df.columns:
+        styled_lineup = styled_lineup.applymap(color_diff, subset=['pts_diff'])
+    
+    # Format numbers
+    format_dict = {
+        "salary": "${:,}",
+        "value": "{:.2f}"
+    }
+    
+    if 'Proj Pts' in lineup_df_display.columns and 'Actual Pts' in lineup_df_display.columns:
+        format_dict.update({
+            'Proj Pts': '{:.1f}',
+            'Actual Pts': '{:.1f}',
+            'pts_diff': '{:+.1f}',
+            'Proj Own%': '{:.1f}%',
+            'Actual Own%': '{:.1f}%'
+        })
+    else:
+        format_dict.update({
+            'Proj Pts': '{:.1f}',
+            'Proj Own%': '{:.1f}%',
+            'MIN': '{:.1f}',
+            'FP/M': '{:.2f}'
+        })
+    
+    styled_lineup = styled_lineup.format(format_dict)
+    
+    st.dataframe(styled_lineup, use_container_width=True, hide_index=True)
+    
+    # Show best/worst performers if we have actuals
+    if 'pts_diff' in lineup_df.columns:
+        st.markdown("**Performance Analysis:**")
+        
+        best_player = lineup_df.loc[lineup_df['pts_diff'].idxmax()]
+        worst_player = lineup_df.loc[lineup_df['pts_diff'].idxmin()]
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.success(f"✅ **Best:** {best_player['Name']} ({best_player['pts_diff']:+.1f} vs proj)")
+        with col2:
+            if worst_player['pts_diff'] < -5:
+                st.error(f"❌ **Worst:** {worst_player['Name']} ({worst_player['pts_diff']:+.1f} vs proj)")
+            else:
+                st.info(f"⚠️ **Lowest:** {worst_player['Name']} ({worst_player['pts_diff']:+.1f} vs proj)")
 
 
 def tab_lineup_builder(slate_df, template):
@@ -647,6 +777,115 @@ def tab_lineup_builder(slate_df, template):
 
     if locked_player_ids or excluded_player_ids:
         st.caption(f"🔒 **Locked:** {len(locked_player_ids)} | ❌ **Excluded:** {len(excluded_player_ids)}")
+
+    st.markdown("---")
+    
+    # ACTUAL RESULTS INPUT SECTION
+    st.subheader("📊 Import Last Night's Results (Optional)")
+    
+    with st.expander("📈 Paste Actual Results to See How Lineups Performed"):
+        st.markdown("""
+        **Upload actual game results to compare vs projections:**
+        
+        Paste data with columns: `Player`, `Roster Position`, `%Drafted`, `FPTS`
+        """)
+        
+        actual_results_input = st.text_area(
+            "Paste actual results here:",
+            height=150,
+            placeholder="Player\tRoster Position\t%Drafted\tFPTS\nNikola Jokic\tC\t7.78%\t66.75\nCade Cunningham\tPG\t5.70%\t56.0",
+            key="results_input"
+        )
+        
+        load_results_btn = st.button("Load Actual Results", use_container_width=True)
+        
+        if load_results_btn and actual_results_input:
+            with st.spinner("Processing actual results..."):
+                try:
+                    data_io = io.StringIO(actual_results_input)
+                    first_line = actual_results_input.split('\n')[0]
+                    
+                    if '\t' in first_line:
+                        actuals_df = pd.read_csv(data_io, sep='\t')
+                    else:
+                        actuals_df = pd.read_csv(data_io)
+                    
+                    actuals_df.columns = actuals_df.columns.str.strip()
+                    
+                    col_map = {
+                        'Player': 'Name',
+                        '%Drafted': 'actual_own',
+                        'FPTS': 'actual_pts'
+                    }
+                    actuals_df.rename(columns=col_map, inplace=True)
+                    
+                    actuals_df['actual_own'] = actuals_df['actual_own'].astype(str).str.replace('%', '').astype(float)
+                    actuals_df['actual_pts'] = pd.to_numeric(actuals_df['actual_pts'], errors='coerce')
+                    
+                    # Merge with current slate
+                    merged_df = edited_df.merge(
+                        actuals_df[['Name', 'actual_own', 'actual_pts']], 
+                        on='Name', 
+                        how='left'
+                    )
+                    
+                    st.session_state['edited_df_with_actuals'] = merged_df
+                    st.session_state['has_actuals'] = True
+                    
+                    players_with_results = merged_df['actual_pts'].notna().sum()
+                    st.success(f"✅ Loaded actual results for {players_with_results} players!")
+                    
+                    # Show quick comparison
+                    if players_with_results > 0:
+                        avg_proj = merged_df[merged_df['actual_pts'].notna()]['proj'].mean()
+                        avg_actual = merged_df[merged_df['actual_pts'].notna()]['actual_pts'].mean()
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Avg Projected", f"{avg_proj:.1f}")
+                        with col2:
+                            st.metric("Avg Actual", f"{avg_actual:.1f}")
+                        with col3:
+                            diff = avg_actual - avg_proj
+                            st.metric("Difference", f"{diff:+.1f}", delta=f"{(diff/avg_proj*100):+.1f}%")
+                    
+                except Exception as e:
+                    st.error(f"Error loading results: {e}")
+                    st.session_state['has_actuals'] = False
+        
+        # Show actuals column in editor if loaded
+        if st.session_state.get('has_actuals', False):
+            st.info("✅ Actual results loaded! They'll be used in lineup analysis.")
+            
+            # Add toggle to show/hide actuals in the player table
+            show_actuals_in_table = st.checkbox("Show actual results in player table above", value=False)
+            
+            if show_actuals_in_table and 'edited_df_with_actuals' in st.session_state:
+                st.markdown("**Players with Actual Results:**")
+                
+                actuals_display = st.session_state['edited_df_with_actuals'][
+                    st.session_state['edited_df_with_actuals']['actual_pts'].notna()
+                ][['Name', 'positions', 'salary', 'proj', 'actual_pts', 'own_proj', 'actual_own']].copy()
+                
+                actuals_display['pts_diff'] = actuals_display['actual_pts'] - actuals_display['proj']
+                actuals_display['own_diff'] = actuals_display['actual_own'] - actuals_display['own_proj']
+                
+                actuals_display = actuals_display.sort_values('pts_diff', ascending=False)
+                
+                st.dataframe(
+                    actuals_display.style.format({
+                        'salary': '${:,}',
+                        'proj': '{:.1f}',
+                        'actual_pts': '{:.1f}',
+                        'pts_diff': '{:+.1f}',
+                        'own_proj': '{:.1f}%',
+                        'actual_own': '{:.1f}%',
+                        'own_diff': '{:+.1f}%'
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=300
+                )
 
     st.markdown("---")
     
