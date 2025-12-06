@@ -1,4 +1,4 @@
-# app.py - FIXED set_page_config PLACEMENT
+# app.py - FINAL FIX: ADDED MISSING COLON AFTER 'with col2'
 
 import pandas as pd 
 import numpy as np
@@ -158,37 +158,4 @@ def color_bucket(s):
     elif s == 'chalk':
         color = 'background-color: #A37F34; color: white' 
     elif s == 'mid':
-        color = 'background-color: #38761D; color: white'  
-    elif s == 'punt':
-        color = 'background-color: #3D85C6; color: white'  
-    else:
-        color = ''
-    return color
-# ----------------------------------------
-
-
-def display_multiple_lineups(slate_df, template, lineup_list):
-    """Function to display the top N optimized lineups with improved UI."""
-    
-    if not lineup_list:
-        st.error("❌ No valid lineups could be found that meet all constraints.")
-        st.warning("Try loosening your constraints or reducing the number of lineups requested.")
-        return
-    
-    # --- METRICS SECTION (UI Improvement) ---
-    best_lineup_data = lineup_list[0]
-    best_proj = best_lineup_data['proj_score']
-    
-    best_lineup_players_df = slate_df[slate_df['player_id'].isin(best_lineup_data['player_ids'])]
-    best_salary = best_lineup_players_df['salary'].sum()
-    best_value = best_proj / (best_salary / 1000) if best_salary else 0
-    
-    st.subheader("🚀 Top Lineup Metrics (Lineup 1)")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric(label="Total Projected Points", 
-                  value=f"{best_proj:.2f}", 
-                  delta="Optimal Lineup Score")
-    with col2
+        color = 'background-color: #
