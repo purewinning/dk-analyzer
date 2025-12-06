@@ -235,7 +235,7 @@ def run_monte_carlo_simulations(
     sim_df = slate_df.copy()
     
     # --- CRITICAL FIX: ENSURE ALL NUMERICAL COLUMNS ARE FLOAT ---
-    # Convert core projection and salary columns to float64 to prevent NumPy type errors
+    # Convert core projection and salary columns to float64 for NumPy compatibility
     sim_df['proj'] = sim_df['proj'].astype(np.float64)
     sim_df['salary'] = sim_df['salary'].astype(np.float64)
     
