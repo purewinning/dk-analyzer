@@ -18,7 +18,6 @@ DEFAULT_ROSTER_SIZE = 8
 # Defines the positional requirements and ownership targets for different contest types.
 DK_NBA_TEMPLATES = {
     # DraftKings NBA Roster Slots (8 total players)
-    # The structure must match the Lineup Requirements image provided.
     "ROSTER_SLOTS": {
         "PG": 1, 
         "SG": 1,
@@ -135,4 +134,18 @@ def build_optimal_lineup(
     player_vars = LpVariable.dicts("Player", playable_df['player_id'], 0, 1, LpBinary)
     
     # 2. Objective Function: Maximize total projected points
-    prob +=
+    prob += lpSum(playable_df.loc[playable_df['player_id'] == pid, 'proj'].iloc[0] * player_vars[pid] 
+                  for pid in playable_df['player_id']), "Total Projection"
+    
+    # 3. Constraints
+    
+    # A. Salary Cap Constraint: Total salary must be <= salary cap
+    prob += lpSum(playable_df.loc[playable_df['player_id'] == pid, 'salary'].iloc[0] * player_vars[pid] 
+                  for pid in playable_df['player_id']) <= template.salary_cap, "Salary Cap"
+                  
+    # B. Roster Size Constraint: Total number of players must equal roster size (8)
+    prob += lpSum(player_vars[pid] for pid in playable_df['player_id']) == template.roster_size, "Roster Size"
+
+    # C. Min Games Constraint: Players must be from at least 2 different games
+    game_ids = playable_df['GameID'].unique()
+    game_vars = LpVariable.dicts("Game", game_ids, 0, 1, LpBinary)
