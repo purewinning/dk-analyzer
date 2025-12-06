@@ -821,6 +821,84 @@ def tab_strategy_lab(slate_df, template):
             
             st.markdown("---")
             
+            # DETAILED LINEUP VIEWER
+            st.subheader("🔍 Detailed Lineup Analysis")
+            
+            # Let user select which lineup to examine
+            lineup_names = results_df['Lineup'].tolist()
+            selected_lineup_name = st.selectbox(
+                "Select lineup to view details:",
+                options=lineup_names,
+                help="Choose a lineup to see the full player breakdown"
+            )
+            
+            # Get the selected lineup data
+            selected_idx = lineup_names.index(selected_lineup_name)
+            selected_lineup_player_ids = lineups[selected_idx]['player_ids']
+            selected_lineup_stats = results_df[results_df['Lineup'] == selected_lineup_name].iloc[0]
+            
+            # Display lineup stats
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Strategy", selected_lineup_stats['Strategy'])
+            with col2:
+                st.metric("Leverage Score", f"{selected_lineup_stats['Leverage Score']:.1f}")
+            with col3:
+                st.metric("Win Rate", f"{selected_lineup_stats['Win Rate %']:.3f}%")
+            with col4:
+                st.metric("Avg Ownership", f"{selected_lineup_stats['Avg Own %']:.1f}%")
+            
+            # Get player details for this lineup
+            lineup_detail_df = slate_df[slate_df['player_id'].isin(selected_lineup_player_ids)].copy()
+            
+            # Assign positions
+            lineup_detail_df = assign_lineup_positions(lineup_detail_df)
+            
+            if lineup_detail_df is not None:
+                # Sort by roster slot
+                ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+                position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
+                lineup_detail_df['roster_slot'] = lineup_detail_df['roster_slot'].astype(position_type)
+                lineup_detail_df = lineup_detail_df.sort_values('roster_slot')
+                
+                # Display columns
+                display_cols = ['roster_slot', 'Name', 'positions', 'Team', 'Opponent', 
+                               'salary', 'proj', 'value', 'own_proj', 'bucket']
+                lineup_display = lineup_detail_df[display_cols].reset_index(drop=True)
+                
+                lineup_display.rename(columns={
+                    'roster_slot': 'SLOT',
+                    'positions': 'POS',
+                    'own_proj': 'OWN%',
+                    'bucket': 'CATEGORY'
+                }, inplace=True)
+                
+                # Style the lineup
+                styled_lineup = lineup_display.style.applymap(
+                    color_bucket, subset=['CATEGORY']
+                ).format({
+                    'salary': '${:,}',
+                    'proj': '{:.1f}',
+                    'value': '{:.2f}',
+                    'OWN%': '{:.1f}%'
+                })
+                
+                st.dataframe(styled_lineup, use_container_width=True, hide_index=True)
+                
+                # Show lineup totals
+                total_salary = lineup_detail_df['salary'].sum()
+                total_proj = lineup_detail_df['proj'].sum()
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Salary", f"${total_salary:,}")
+                with col2:
+                    st.metric("Total Projection", f"{total_proj:.1f}")
+                with col3:
+                    st.metric("Remaining Salary", f"${50000 - total_salary:,}")
+            
+            st.markdown("---")
+            
             # Full Results Table
             st.subheader("Full Lineup Comparison")
             
