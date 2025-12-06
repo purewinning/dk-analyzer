@@ -649,9 +649,9 @@ def display_multiple_lineups(slate_df, template, lineup_list):
     # SHOW TOP EDGES
     st.subheader("🔥 Top Edges by Template")
     
-    if not df_for_editor.empty:
+    if not slate_df.empty:
         # Show elite leverage plays
-        elite_plays = df_for_editor[df_for_editor['edge_category'] == '🔥 Elite Leverage'].nlargest(5, 'gpp_score')[
+        elite_plays = slate_df[slate_df['edge_category'] == '🔥 Elite Leverage'].nlargest(5, 'gpp_score')[
             ['Name', 'positions', 'salary', 'proj', 'own_proj', 'leverage_score', 'gpp_score']
         ]
         
@@ -670,7 +670,7 @@ def display_multiple_lineups(slate_df, template, lineup_list):
             )
         
         # Show chalk traps
-        chalk_traps = df_for_editor[df_for_editor['edge_category'].isin(['❌ Chalk Trap', '⚠️ Slight Chalk'])].nsmallest(5, 'leverage_score')[
+        chalk_traps = slate_df[slate_df['edge_category'].isin(['❌ Chalk Trap', '⚠️ Slight Chalk'])].nsmallest(5, 'leverage_score')[
             ['Name', 'positions', 'salary', 'proj', 'own_proj', 'leverage_score', 'gpp_score']
         ]
         
