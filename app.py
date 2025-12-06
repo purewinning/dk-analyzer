@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st 
 from typing import Dict, Any, List
-# Ensure this block is exactly correct, including the final closing parenthesis.
+# Ensure this import block is perfectly copied
 from builder import (
     build_template_from_params, 
     build_optimal_lineup, 
@@ -207,14 +207,35 @@ def tab_lineup_builder(slate_df, template):
             games_used = optimal_lineup_df['GameID'].nunique()
             
             st.success("### 🏆 Optimal Lineup Found")
+
+            # --- START: LINEUP FORMATTING LOGIC ---
             
-            display_cols = ['Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
-            lineup_df_display = optimal_lineup_df[display_cols].sort_values(by='proj', ascending=False).reset_index(drop=True)
+            ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
+            
+            # This is a temporary fix for display: Assign 8 positions to the 8 players selected
+            optimal_lineup_df = optimal_lineup_df.head(8).assign(
+                roster_position=ROSTER_ORDER
+            )
+
+            # 2. Sort the DataFrame by the custom position order
+            position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
+            optimal_lineup_df['roster_position'] = optimal_lineup_df['roster_position'].astype(position_type)
+            optimal_lineup_df.sort_values(by='roster_position', inplace=True)
+            
+            # 3. Define display columns (now including the new roster_position)
+            display_cols = ['roster_position', 'Name', 'positions', 'Team', 'GameID', 'salary', 'proj', 'own_proj', 'bucket']
+            lineup_df_display = optimal_lineup_df[display_cols].reset_index(drop=True)
+            
+            # 4. Rename the column for display
+            lineup_df_display.rename(columns={'roster_position': 'SLOT'}, inplace=True)
+            
+            # --- END: LINEUP FORMATTING LOGIC ---
             
             # Format dataframe for pretty display
             st.dataframe(
                 lineup_df_display.style.format({"salary": "${:,}", "proj": "{:.1f}", "own_proj": "{:.1f}%"}),
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True 
             )
             
             col1, col2, col3 = st.columns(3)
