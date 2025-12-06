@@ -1019,6 +1019,232 @@ def tab_strategy_lab(slate_df, template):
                 st.write(f"- Winning construction: {int(best_lineup['Mega Chalk'])} mega, {int(best_lineup['Chalk'])} chalk, {int(best_lineup['Mid'])} mid, {int(best_lineup['Punt'])} punt")
 
 
+def tab_results_analysis(slate_df, template):
+    """Render the Results Analysis - Compare projections vs actuals."""
+    st.header("📈 Results Analysis - Actual Performance")
+    
+    if slate_df.empty:
+        st.info("✏️ Load your player data first in the sidebar.")
+        return
+    
+    st.markdown("""
+    Upload actual game results to see how your projections performed.
+    Compare projected vs actual scores and ownership.
+    """)
+    
+    st.subheader("Paste Actual Results Data")
+    
+    actual_results_data = st.text_area(
+        "Paste actual results (Player, Roster Position, %Drafted, FPTS):",
+        height=200,
+        placeholder="Player\tRoster Position\t%Drafted\tFPTS\nNikola Jokic\tC\t7.78%\t66.75"
+    )
+    
+    load_results_btn = st.button("Load Actual Results", use_container_width=True)
+    
+    if load_results_btn and actual_results_data:
+        with st.spinner("Processing actual results..."):
+            try:
+                # Parse the actual results
+                data_io = io.StringIO(actual_results_data)
+                
+                # Detect separator
+                first_line = actual_results_data.split('\n')[0]
+                if '\t' in first_line:
+                    actuals_df = pd.read_csv(data_io, sep='\t')
+                else:
+                    actuals_df = pd.read_csv(data_io)
+                
+                # Clean column names
+                actuals_df.columns = actuals_df.columns.str.strip()
+                
+                # Standardize column names
+                col_map = {
+                    'Player': 'Name',
+                    '%Drafted': 'actual_own',
+                    'FPTS': 'actual_pts'
+                }
+                actuals_df.rename(columns=col_map, inplace=True)
+                
+                # Clean ownership (remove %)
+                actuals_df['actual_own'] = actuals_df['actual_own'].astype(str).str.replace('%', '').astype(float)
+                actuals_df['actual_pts'] = pd.to_numeric(actuals_df['actual_pts'], errors='coerce')
+                
+                # Merge with slate data
+                merged_df = slate_df.merge(
+                    actuals_df[['Name', 'actual_own', 'actual_pts']], 
+                    on='Name', 
+                    how='left'
+                )
+                
+                # Store in session state
+                st.session_state['results_df'] = merged_df
+                st.success(f"✅ Loaded actual results for {len(actuals_df)} players!")
+                
+            except Exception as e:
+                st.error(f"Error loading results: {e}")
+                return
+    
+    # Display analysis if results are loaded
+    if 'results_df' in st.session_state:
+        results_df = st.session_state['results_df']
+        
+        # Filter to only players with actual results
+        results_df_with_actuals = results_df.dropna(subset=['actual_pts']).copy()
+        
+        if len(results_df_with_actuals) == 0:
+            st.warning("No actual results found. Make sure player names match exactly.")
+            return
+        
+        # Calculate differences
+        results_df_with_actuals['pts_diff'] = results_df_with_actuals['actual_pts'] - results_df_with_actuals['proj']
+        results_df_with_actuals['own_diff'] = results_df_with_actuals['actual_own'] - results_df_with_actuals['own_proj']
+        results_df_with_actuals['pts_pct_diff'] = (results_df_with_actuals['pts_diff'] / results_df_with_actuals['proj'] * 100).round(1)
+        
+        # Overall metrics
+        st.subheader("📊 Overall Projection Accuracy")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        avg_proj_error = results_df_with_actuals['pts_diff'].mean()
+        avg_own_error = results_df_with_actuals['own_diff'].mean()
+        total_proj = results_df_with_actuals['proj'].sum()
+        total_actual = results_df_with_actuals['actual_pts'].sum()
+        
+        with col1:
+            st.metric("Avg Points Error", f"{avg_proj_error:+.2f}", 
+                     delta=f"{(avg_proj_error/results_df_with_actuals['proj'].mean()*100):+.1f}%")
+        with col2:
+            st.metric("Avg Own% Error", f"{avg_own_error:+.2f}%")
+        with col3:
+            st.metric("Total Proj", f"{total_proj:.1f}")
+        with col4:
+            st.metric("Total Actual", f"{total_actual:.1f}", 
+                     delta=f"{total_actual - total_proj:+.1f}")
+        
+        st.markdown("---")
+        
+        # Top performers vs projection
+        st.subheader("🚀 Biggest Outperformers (vs Projection)")
+        
+        top_outperform = results_df_with_actuals.nlargest(10, 'pts_diff')[
+            ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'pts_diff', 'own_proj', 'actual_own']
+        ]
+        
+        st.dataframe(
+            top_outperform.style.format({
+                'salary': '${:,}',
+                'proj': '{:.1f}',
+                'actual_pts': '{:.1f}',
+                'pts_diff': '{:+.1f}',
+                'own_proj': '{:.1f}%',
+                'actual_own': '{:.1f}%'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        st.markdown("---")
+        
+        # Biggest busts
+        st.subheader("📉 Biggest Underperformers (vs Projection)")
+        
+        top_underperform = results_df_with_actuals.nsmallest(10, 'pts_diff')[
+            ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'pts_diff', 'own_proj', 'actual_own']
+        ]
+        
+        st.dataframe(
+            top_underperform.style.format({
+                'salary': '${:,}',
+                'proj': '{:.1f}',
+                'actual_pts': '{:.1f}',
+                'pts_diff': '{:+.1f}',
+                'own_proj': '{:.1f}%',
+                'actual_own': '{:.1f}%'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        st.markdown("---")
+        
+        # Check lineup performance if lineups exist
+        if st.session_state['optimal_lineups_results'].get('ran', False):
+            st.subheader("🏆 Your Lineups - Actual Performance")
+            
+            lineups = st.session_state['optimal_lineups_results']['lineups']
+            
+            lineup_performance = []
+            
+            for i, lineup in enumerate(lineups[:10]):  # Top 10 lineups
+                lineup_players = results_df[results_df['player_id'].isin(lineup['player_ids'])]
+                
+                # Calculate actual score if all players have results
+                if lineup_players['actual_pts'].notna().all():
+                    actual_score = lineup_players['actual_pts'].sum()
+                    proj_score = lineup['proj_score']
+                    diff = actual_score - proj_score
+                    
+                    lineup_performance.append({
+                        'Lineup': f"Lineup {i+1}",
+                        'Projected': proj_score,
+                        'Actual': actual_score,
+                        'Difference': diff,
+                        'Accuracy %': (actual_score / proj_score * 100) - 100
+                    })
+            
+            if lineup_performance:
+                perf_df = pd.DataFrame(lineup_performance)
+                
+                # Highlight best performing lineup
+                def highlight_best(s):
+                    if s.name == 'Actual':
+                        max_val = s.max()
+                        return ['background-color: #90EE90; font-weight: bold' if v == max_val else '' for v in s]
+                    return ['' for _ in s]
+                
+                st.dataframe(
+                    perf_df.style.apply(highlight_best, axis=0).format({
+                        'Projected': '{:.2f}',
+                        'Actual': '{:.2f}',
+                        'Difference': '{:+.2f}',
+                        'Accuracy %': '{:+.1f}%'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Show best lineup details
+                best_lineup_idx = perf_df['Actual'].idxmax()
+                best_lineup_num = int(perf_df.iloc[best_lineup_idx]['Lineup'].split()[1]) - 1
+                
+                st.markdown(f"**Best Performing Lineup: {perf_df.iloc[best_lineup_idx]['Lineup']}**")
+                st.markdown(f"Actual Score: **{perf_df.iloc[best_lineup_idx]['Actual']:.2f}** points")
+                
+                # Show the players in that lineup
+                best_lineup_player_ids = lineups[best_lineup_num]['player_ids']
+                best_lineup_detail = results_df[results_df['player_id'].isin(best_lineup_player_ids)][
+                    ['Name', 'positions', 'salary', 'proj', 'actual_pts', 'own_proj', 'actual_own']
+                ].copy()
+                
+                best_lineup_detail['pts_diff'] = best_lineup_detail['actual_pts'] - best_lineup_detail['proj']
+                
+                st.dataframe(
+                    best_lineup_detail.style.format({
+                        'salary': '${:,}',
+                        'proj': '{:.1f}',
+                        'actual_pts': '{:.1f}',
+                        'pts_diff': '{:+.1f}',
+                        'own_proj': '{:.1f}%',
+                        'actual_own': '{:.1f}%'
+                    }),
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("Load actual results for all players in your lineups to see performance.")
+
+
 def tab_contest_analyzer(slate_df, template):
     """Render the Contest Analyzer."""
     st.header("Contest Strategy Analyzer")
@@ -1103,7 +1329,7 @@ if __name__ == '__main__':
     )
     
     # Main tabs
-    tab1, tab2, tab3 = st.tabs(["🏗️ Lineup Builder", "🧪 Strategy Lab", "📊 Contest Analyzer"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🏗️ Lineup Builder", "🧪 Strategy Lab", "📈 Results Analysis", "📊 Contest Analyzer"])
     
     with tab1:
         tab_lineup_builder(slate_df, template)
@@ -1112,4 +1338,7 @@ if __name__ == '__main__':
         tab_strategy_lab(slate_df, template)
     
     with tab3:
+        tab_results_analysis(slate_df, template)
+    
+    with tab4:
         tab_contest_analyzer(slate_df, template)
