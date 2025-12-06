@@ -1,4 +1,4 @@
-# app.py - FINAL COMPLETE CODE (Header Fix v2)
+# app.py - SIMPLIFIED AND FIXED (Headers assumed as Title Case, e.g., 'Salary')
 
 import pandas as pd 
 import numpy as np
@@ -17,88 +17,62 @@ from builder import (
 # --- CONFIGURATION CONSTANTS ---
 MIN_GAMES_REQUIRED = 2
 
-# --- HEADER MAPPING (Optimized for All-Caps Headers from your source) ---
+# --- HEADER MAPPING (Simplified to exact Title Case headers from the image) ---
+# NOTE: Keys MUST match the exact headers in your CSV file.
 REQUIRED_CSV_TO_INTERNAL_MAP = {
-    # Salary
-    'SALARY': 'salary', 
-    'Salary': 'salary', # Keeping standard case as backup
-    
-    # Position
-    'POSITION': 'positions', 
+    'Player': 'Name',
+    'Salary': 'salary', 
     'Position': 'positions',
-    
-    # Projection
-    'PROJECTED FP': 'proj',   # Exact match from image
+    'Team': 'Team',
+    'Opponent': 'Opponent',
     'Projection': 'proj',
-    
-    # Ownership
-    'OWNERSHIP%': 'own_proj',  # Exact match from image
     'Ownership': 'own_proj',
     
-    # Player
-    'PLAYER': 'Name',
-    'Player': 'Name',
-    
-    # Team
-    'TEAM': 'Team',
-    'Team': 'Team',
-    
-    # Opponent
-    'OPPONENT': 'Opponent',
-    'Opponent': 'Opponent',
-    
-    # Other supporting columns (no conflict)
+    # Other supporting columns
     'Minutes': 'Minutes',
     'FPPM': 'FPPM',
     'Value': 'Value'
 }
+CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name', 'Team', 'Opponent']
 
 # --- 1. DATA PREPARATION ---
 
 def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
-    """Loads CSV, standardizes ownership to 0-100 scale, and processes data."""
+    """Loads CSV, standardizes ownership, and processes data."""
     
     df = pd.DataFrame()
-    CORE_INTERNAL_COLS = ['salary', 'positions', 'proj', 'own_proj', 'Name', 'Team', 'Opponent']
     
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
             st.success("✅ Data loaded successfully. Checking headers...")
             
-            # --- Robust Header Validation and Mapping ---
-            # 1. Clean the CSV headers of any accidental leading/trailing whitespace
-            df.columns = df.columns.str.strip() 
-
-            internal_to_possible_csv = {
-                'salary': ['SALARY', 'Salary'],
-                'positions': ['POSITION', 'Position'],
-                'proj': ['PROJECTED FP', 'Projection'],
-                'own_proj': ['OWNERSHIP%', 'Ownership'],
-                'Name': ['PLAYER', 'Player'],
-                'Team': ['TEAM', 'Team'],
-                'Opponent': ['OPPONENT', 'Opponent']
-            }
+            # --- CRITICAL FIX: STRIP WHITESPACE FROM ALL HEADERS ---
+            df.columns = df.columns.str.strip()
             
+            # --- VALIDATE AND MAP REQUIRED COLUMNS ---
             actual_map = {}
             missing_internal_cols = []
             
-            for internal_name, possible_names in internal_to_possible_csv.items():
-                found = False
-                for name in possible_names:
-                    # Check if the cleaned column name exists in the DataFrame
-                    if name in df.columns:
-                        actual_map[name] = internal_name
-                        found = True
-                        break
-                
-                if not found and internal_name in CORE_INTERNAL_COLS:
-                    missing_internal_cols.append(internal_name)
+            # 1. Build the actual mapping based on what's in the CSV and what's required
+            for csv_name, internal_name in REQUIRED_CSV_TO_INTERNAL_MAP.items():
+                if csv_name in df.columns:
+                    actual_map[csv_name] = internal_name
+                elif internal_name in CORE_INTERNAL_COLS:
+                    # Collect missing internal columns for the error message
+                    if internal_name not in [v for k, v in actual_map.items()]:
+                        missing_internal_cols.append(csv_name) # Append the expected CSV name
+            
+            # 2. Check for missing required columns
+            # The list below covers the 7 essential columns (by their expected CSV name)
+            essential_csv_names = ['Player', 'Salary', 'Position', 'Team', 'Opponent', 'Projection', 'Ownership']
+            
+            # Check if all essential CSV names are present in the actual_map keys
+            final_missing = [name for name in essential_csv_names if name not in actual_map]
 
-            if missing_internal_cols:
-                # If required columns are missing, show a detailed error
-                st.error(f"Missing essential headers: Could not find a match for {', '.join(missing_internal_cols)}.")
-                st.error("Please ensure your CSV contains: Player/PLAYER, Salary/SALARY, Position/POSITION, Projected FP/Projection, Ownership/OWNERSHIP%, Team/TEAM, Opponent/OPPONENT.")
+            if final_missing:
+                st.error(f"Missing essential headers: The following columns are missing or incorrectly named: {', '.join(final_missing)}.")
+                st.error("Please ensure your CSV headers exactly match: Player, Salary, Position, Team, Opponent, Projection, Ownership.")
                 return pd.DataFrame()
 
             # Rename columns using the filtered, actual map
@@ -136,7 +110,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
                 # Handle other columns dynamically
                 df_columns = df.columns.tolist()
                 
-                # Checking for Minute/FPPM/Value columns by their internal names after mapping
                 if 'Minutes' in df_columns:
                     df['Minutes'] = pd.to_numeric(df.get('Minutes', 0), errors='coerce').astype(float).round(2)
                 if 'FPPM' in df_columns:
@@ -156,7 +129,6 @@ def load_and_preprocess_data(uploaded_file=None) -> pd.DataFrame:
             st.error(f"Error processing file: {e}")
             return pd.DataFrame()
     else:
-        # --- PLACEHOLDER DATA REMOVED: Return empty DF if no file is uploaded ---
         return pd.DataFrame()
 
 
@@ -304,175 +276,3 @@ def tab_lineup_builder(slate_df, template):
     if slate_df.empty:
         st.info("⬆️ Please upload your CSV file using the sidebar to view the player pool.")
         return
-
-    # --- A. PLAYER POOL EDITOR (Visible only after data is loaded) ---
-    st.markdown("Use the table to **🔒 Lock** or **❌ Exclude** players. The **Category** column shows ownership risk.")
-    
-    column_config = {
-        "Name": st.column_config.TextColumn("Player", disabled=True), 
-        "bucket": st.column_config.TextColumn("Category", disabled=True, help="punt (<10%), mid (10-30%), chalk (30-40%), mega (>40%)", width="small"),
-        "positions": st.column_config.TextColumn("Pos", disabled=True), 
-        "Team": st.column_config.TextColumn("Team", disabled=True, width="small"), 
-        "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
-        "salary": st.column_config.NumberColumn("Salary", format="$%d", width="small"), 
-        "proj": st.column_config.NumberColumn("Proj Pts", format="%.1f", width="small"), 
-        "value": st.column_config.NumberColumn("Value (X)", format="%.2f", disabled=True, width="small"), 
-        "own_proj": st.column_config.NumberColumn("Own %", format="%.1f%%", width="small"),
-        "Minutes": st.column_config.NumberColumn("Min", format="%.1f", width="small"),
-        "FPPM": st.column_config.NumberColumn("FP/M", format="%.2f", width="small"),
-        "Lock": st.column_config.CheckboxColumn("🔒 Lock", help="Force this player into the lineup", width="small"), 
-        "Exclude": st.column_config.CheckboxColumn("❌ Exclude", help="Ban this player from the lineup", width="small"), 
-        "player_id": None, "GameID": None 
-    }
-    
-    column_order = [
-        'Lock', 'Exclude', 'Name', 'bucket', 'positions', 'Team', 'Opponent', 
-        'salary', 'proj', 'value', 'own_proj', 'Minutes', 'FPPM'
-    ]
-    
-    df_for_editor = slate_df[column_order + ['player_id', 'GameID']].copy()
-
-    edited_df = st.data_editor(
-        df_for_editor, 
-        column_config=column_config,
-        column_order=column_order, 
-        hide_index=True,
-        use_container_width=True,
-        height=400,
-        key="player_editor_final"
-    )
-    st.session_state['edited_df'] = edited_df
-    
-    # Extract Constraints
-    edited_df['player_id'] = edited_df['player_id'].astype(str)
-    
-    locked_player_ids = edited_df[edited_df['Lock'] == True]['player_id'].tolist()
-    excluded_player_ids = edited_df[edited_df['Exclude'] == True]['player_id'].tolist()
-
-    if locked_player_ids or excluded_player_ids:
-        st.caption(f"🔒 **Locked:** {len(locked_player_ids)} | ❌ **Excluded:** {len(excluded_player_ids)}")
-
-    st.markdown("---")
-    
-    # --- B. OPTIMIZATION CONTROLS ---
-    st.header("2. Find Optimal Lineups")
-    
-    col_n, col_slack = st.columns(2)
-    
-    with col_n:
-        n_lineups = st.slider("Number of Lineups to Generate (N)", 
-                              min_value=1, max_value=20, value=10, step=1,
-                              help="The optimizer will find the N highest projected, unique lineups that meet all constraints.")
-    
-    with col_slack:
-        slack = st.slider("Ownership Target Slack (Flexibility)", 
-                          min_value=0, max_value=4, value=1, step=1,
-                          help="Higher slack allows the optimizer to deviate more from the template's target player counts for each ownership bucket to find a higher projected score.")
-    
-    
-    run_btn = st.button(f"✨ Generate Top {n_lineups} Lineups", use_container_width=True)
-    
-    if run_btn:
-        final_df = st.session_state['edited_df'].copy()
-        
-        final_df['bucket'] = final_df['own_proj'].apply(ownership_bucket)
-        
-        conflict = set(locked_player_ids) & set(excluded_player_ids)
-        if conflict:
-            st.error(f"❌ CONFLICT: Player(s) {', '.join(conflict)} are both locked and excluded.")
-            return
-
-        with st.spinner(f'Calculating top {n_lineups} optimal lineups...'):
-            top_lineups = generate_top_n_lineups(
-                slate_df=final_df,
-                template=template,
-                n_lineups=n_lineups,
-                bucket_slack=slack,
-                locked_player_ids=locked_player_ids, 
-                excluded_player_ids=excluded_player_ids, 
-            )
-        
-        st.session_state['optimal_lineups_results'] = {
-            'lineups': top_lineups, 
-            'ran': True
-        }
-        
-        st.success(f"✅ Optimization complete! Found {len(top_lineups)} unique lineups.")
-
-    
-    st.markdown("---")
-    st.header(f"3. Top {n_lineups} Lineups")
-    
-    if st.session_state['optimal_lineups_results'].get('ran', False):
-        display_multiple_lineups(slate_df, template, st.session_state['optimal_lineups_results']['lineups'])
-
-    else:
-        st.info("Select the number of lineups and click 'Generate Top N Lineups' above to run the multi-lineup builder.")
-
-
-def tab_contest_analyzer(slate_df, template):
-    """Render the Contest Analyzer."""
-    st.header("Contest Strategy Analyzer")
-    
-    if slate_df.empty:
-        st.info("⬆️ Please upload your CSV file using the sidebar to view the contest analyzer.")
-        return
-
-    st.info(f"Analysis based on: **{template.contest_label}**")
-
-    st.subheader("Target Ownership Structure")
-    ranges = template.bucket_ranges(slack=0) 
-    
-    range_data = {
-        "Ownership Bucket": ["Punt (<10%)", "Mid (10-30%)", "Chalk (30-40%)", "Mega Chalk (>40%)"],
-        "Target Player Count": [
-            f"{ranges['punt'][0]}-{ranges['punt'][1]}",
-            f"{ranges['mid'][0]}-{ranges['mid'][1]}",
-            f"{ranges['chalk'][0]}-{ranges['chalk'][1]}",
-            f"{ranges['mega'][0]}-{ranges['mega'][1]}"
-        ]
-    }
-    st.table(pd.DataFrame(range_data))
-
-    st.subheader("Your Player Pool Distribution")
-    pool_counts = slate_df['bucket'].value_counts().reindex(list(ranges.keys()), fill_value=0)
-    st.bar_chart(pool_counts)
-
-
-# --- 4. MAIN ENTRY POINT ---
-
-if __name__ == '__main__':
-    st.set_page_config(layout="wide", page_title="🏀 DK Lineup Optimizer")
-    
-    # Sidebar
-    with st.sidebar:
-        st.title("🏀 DK Lineup Optimizer")
-        st.caption("Maximize Projection based on Template")
-        contest_type = st.selectbox("Contest Strategy", ['GPP (Single Entry)', 'GPP (Large Field)', 'CASH'])
-        
-        c_map = {'GPP (Single Entry)': 'SE', 'GPP (Large Field)': 'LARGE_GPP', 'CASH': 'CASH'}
-        contest_code = c_map[contest_type]
-        
-        st.divider()
-        uploaded_file = st.file_uploader("Upload CSV", type=['csv'])
-        
-    # Load Data
-    slate_df = load_and_preprocess_data(uploaded_file)
-        
-    # Build Template
-    template = build_template_from_params(
-        contest_type=contest_code, 
-        field_size=10000, 
-        pct_to_first=30.0,
-        roster_size=DEFAULT_ROSTER_SIZE,
-        salary_cap=DEFAULT_SALARY_CAP,
-        min_games=MIN_GAMES_REQUIRED
-    )
-
-    # Tabs
-    t1, t2 = st.tabs(["✨ Optimal Lineup Builder", "📝 Contest Analyzer"])
-    
-    with t1:
-        tab_lineup_builder(slate_df, template)
-    with t2:
-        tab_contest_analyzer(slate_df, template)
