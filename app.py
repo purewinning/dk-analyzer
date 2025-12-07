@@ -6,15 +6,16 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
-from builder import ownership_bucket  # ONLY this; no DEFAULT_* surprises
+# Only using ownership_bucket from builder.py; NO salary/roster stuff
+from builder import ownership_bucket
 
 # -------------------------------------------------------------------
 # BASIC CONFIG / NBA RULES
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="NBA DFS Lineup Builder")
 
-SALARY_CAP = 50000   # DraftKings NBA classic
-ROSTER_SIZE = 8      # PG, SG, SF, PF, C, G, F, UTIL
+DEFAULT_SALARY_CAP = 50000   # DraftKings NBA classic default
+DEFAULT_ROSTER_SIZE = 8      # PG, SG, SF, PF, C, G, F, UTIL
 
 # -------------------------------------------------------------------
 # CSV MAPPING / EDGE CALCS
@@ -482,12 +483,14 @@ def build_simple_lineups(
     roster_size: int,
     locked_ids: List[str],
     excluded_ids: List[str],
+    max_tries_per_lineup: int = 3000,
 ) -> List[Dict[str, Any]]:
     """
-    Lineup builder with edge logic:
+    Edge-based random search:
     - Uses proj + gpp_score + leverage - ownership penalty
     - Weights depend on contest_style (cash vs SE vs 20-max vs milly)
-    - Always respects locks/excludes, salary cap, roster size
+    - Samples lineups randomly, biased toward high edge_score_base
+    - Much more likely to find a valid lineup if one exists
     """
 
     # Filter out excluded upfront
@@ -499,7 +502,7 @@ def build_simple_lineups(
     if len(locks_df) > roster_size:
         return []  # impossible
 
-    lock_salary = locks_df["salary"].sum()
+    lock_salary = int(locks_df["salary"].sum()) if not locks_df.empty else 0
     if lock_salary > salary_cap:
         return []  # impossible
 
@@ -517,70 +520,76 @@ def build_simple_lineups(
         - weights["own"] * pool["own_proj"]
     )
 
-    lineups = []
+    # Base pool for non-locked players
+    base_pool = pool[~pool["player_id"].isin(locked_ids)].copy()
 
-    for i in range(n_lineups):
-        used_ids = set(locked_ids)
-        current_salary = lock_salary
-        lineup_players = list(locks_df["player_id"])
+    if len(base_pool) + len(locks_df) < roster_size:
+        return []  # not enough total players to fill lineup
 
-        # Tiny noise per lineup so we don't get the same thing every time
-        noise = np.random.normal(0, 0.5, size=len(pool))
-        pool["edge_score"] = pool["edge_score_base"] + noise
+    # Probabilities for weighted sampling
+    scores = base_pool["edge_score_base"].to_numpy()
+    # shift so all >= 0
+    min_score = np.min(scores)
+    scores_shifted = scores - min_score + 1.0  # ensure positive
+    probs = scores_shifted / scores_shifted.sum()
+    base_ids = base_pool["player_id"].to_numpy()
 
-        # Sort by edge_score
-        candidates = pool.sort_values("edge_score", ascending=False)
+    lineups: List[Dict[str, Any]] = []
+    seen_sets = set()
 
-        for _, row in candidates.iterrows():
-            pid = row["player_id"]
-            if pid in used_ids:
-                continue
-            if len(lineup_players) >= roster_size:
+    rng = np.random.default_rng()
+
+    for _ in range(n_lineups * 5):  # a bit of overbuild so we get enough uniques
+        # try multiple attempts for a single lineup
+        lineup_found = False
+        for _try in range(max_tries_per_lineup):
+            used_ids = set(locked_ids)
+            current_salary = lock_salary
+            lineup_players = list(locks_df["player_id"])
+
+            slots_left = roster_size - len(lineup_players)
+            if slots_left <= 0:
                 break
-            if current_salary + row["salary"] > salary_cap:
-                continue
-            lineup_players.append(pid)
-            used_ids.add(pid)
-            current_salary += row["salary"]
 
-        # If we couldn't fill, try a second pass by cheapest salary
-        if len(lineup_players) < roster_size:
-            remaining = pool[~pool["player_id"].isin(used_ids)].sort_values("salary")
-            for _, row in remaining.iterrows():
-                if len(lineup_players) >= roster_size:
-                    break
-                pid = row["player_id"]
-                if current_salary + row["salary"] > salary_cap:
-                    continue
-                lineup_players.append(pid)
-                used_ids.add(pid)
-                current_salary += row["salary"]
+            if len(base_ids) < slots_left:
+                return []  # not enough non-locked players
 
-        if len(lineup_players) != roster_size:
-            # If still not full, skip this lineup
+            # sample slots_left players, weighted by edge_score_base, without replacement
+            try:
+                chosen_idx = rng.choice(
+                    len(base_ids), size=slots_left, replace=False, p=probs
+                )
+            except ValueError:
+                # fallback to uniform sampling if probs weird
+                chosen_idx = rng.choice(len(base_ids), size=slots_left, replace=False)
+
+            chosen_ids = base_ids[chosen_idx]
+
+            total_salary = current_salary + int(
+                base_pool[base_pool["player_id"].isin(chosen_ids)]["salary"].sum()
+            )
+
+            if total_salary <= salary_cap:
+                lineup_players.extend(list(chosen_ids))
+                lineup_found = True
+                break
+
+        if not lineup_found:
+            # couldn't find new lineup for this iteration
             continue
 
-        lineup_proj = float(
-            pool[pool["player_id"].isin(lineup_players)]["proj"].sum()
-        )
-        lineups.append(
-            {
-                "player_ids": lineup_players,
-                "proj_score": lineup_proj,
-            }
-        )
-
-    # Deduplicate lineups by player set
-    unique_lineups = []
-    seen = set()
-    for lu in lineups:
-        key = tuple(sorted(lu["player_ids"]))
-        if key in seen:
+        key = tuple(sorted(lineup_players))
+        if key in seen_sets:
             continue
-        seen.add(key)
-        unique_lineups.append(lu)
+        seen_sets.add(key)
 
-    return unique_lineups
+        lineup_proj = float(pool[pool["player_id"].isin(lineup_players)]["proj"].sum())
+        lineups.append({"player_ids": list(lineup_players), "proj_score": lineup_proj})
+
+        if len(lineups) >= n_lineups:
+            break
+
+    return lineups
 
 
 # -------------------------------------------------------------------
@@ -610,6 +619,17 @@ field_size = st.sidebar.number_input(
     step=100,
 )
 
+# Allow manual cap tweak in case slate is weird
+salary_cap = st.sidebar.number_input(
+    "Salary Cap",
+    min_value=30000,
+    max_value=70000,
+    value=DEFAULT_SALARY_CAP,
+    step=5000,
+)
+
+roster_size = DEFAULT_ROSTER_SIZE  # fixed for NBA classic
+
 default_n = get_default_n_lineups(contest_type_label)
 n_lineups = st.sidebar.slider(
     "Number of Lineups",
@@ -619,7 +639,9 @@ n_lineups = st.sidebar.slider(
 )
 
 contest_style = get_builder_style(contest_type_label, int(field_size))
-st.sidebar.caption(f"Build style: **{contest_style}** (proj + upside + leverage – ownership)")
+st.sidebar.caption(
+    f"Build style: **{contest_style}** (proj + upside + leverage – ownership)"
+)
 
 st.sidebar.markdown("---")
 pasted_csv_data = st.sidebar.text_area(
@@ -668,9 +690,7 @@ else:
         "positions": st.column_config.TextColumn("Pos", disabled=True),
         "salary": st.column_config.NumberColumn("Salary", format="$%d"),
         "proj": st.column_config.NumberColumn("Proj", format="%.1f"),
-        "value": st.column_config.NumberColumn(
-            "Value", disabled=True, format="%.2f"
-        ),
+        "value": st.column_config.NumberColumn("Value", disabled=True, format="%.2f"),
         "own_proj": st.column_config.NumberColumn("Own%", format="%.1f%%"),
         "Lock": st.column_config.CheckboxColumn("🔒"),
         "Exclude": st.column_config.CheckboxColumn("❌"),
@@ -722,73 +742,87 @@ else:
     locked_ids = edited_df[edited_df["Lock"] == True]["player_id"].tolist()
     excluded_ids = edited_df[edited_df["Exclude"] == True]["player_id"].tolist()
     if locked_ids or excluded_ids:
-        st.caption(
-            f"Locked: {len(locked_ids)}   •   Excluded: {len(excluded_ids)}"
-        )
+        st.caption(f"Locked: {len(locked_ids)}   •   Excluded: {len(excluded_ids)}")
 
     st.markdown("---")
     run_btn = st.button("Generate Lineups", type="primary")
 
     if run_btn:
         # Pre-flight sanity checks to avoid mysterious "no valid lineups"
-        pool_for_check = edited_df[~edited_df["player_id"].isin(excluded_ids)]
+        pool_for_check = edited_df[~edited_df["player_id"].isin(excluded_ids)].copy()
 
-        if len(pool_for_check) < ROSTER_SIZE:
+        if len(pool_for_check) < roster_size:
             st.error(
                 f"❌ Not enough players to build a full lineup.\n\n"
                 f"- Players available after excludes: {len(pool_for_check)}\n"
-                f"- Required for NBA DK: {ROSTER_SIZE}\n\n"
+                f"- Required: {roster_size}\n\n"
                 f"Remove some excludes or load a larger pool."
             )
         else:
-            locks_df = pool_for_check[pool_for_check["player_id"].isin(locked_ids)]
-
-            if len(locks_df) > ROSTER_SIZE:
+            # Cheapest possible lineup check
+            cheapest_sum = int(
+                pool_for_check["salary"].nsmallest(roster_size).sum()
+            )
+            if cheapest_sum > salary_cap:
                 st.error(
-                    f"❌ Too many locked players.\n\n"
-                    f"- Locked: {len(locks_df)}\n"
-                    f"- Roster size: {ROSTER_SIZE}\n\n"
-                    f"Unlock at least {len(locks_df) - ROSTER_SIZE} player(s)."
+                    "❌ No valid lineup can exist with this salary cap.\n\n"
+                    f"- Sum of {roster_size} cheapest players: ${cheapest_sum:,}\n"
+                    f"- Salary cap: ${salary_cap:,}\n\n"
+                    "Either your salary cap is set too low for this slate,\n"
+                    "or your player pool is filtered to only expensive players.\n\n"
+                    "Try increasing the cap in the sidebar or broadening the pool."
                 )
             else:
-                lock_salary = int(locks_df["salary"].sum()) if not locks_df.empty else 0
-                if lock_salary > SALARY_CAP:
+                locks_df = pool_for_check[pool_for_check["player_id"].isin(locked_ids)]
+
+                if len(locks_df) > roster_size:
                     st.error(
-                        f"❌ Salary cap exceeded by locks alone.\n\n"
-                        f"- Locked salary: ${lock_salary:,}\n"
-                        f"- Cap: ${SALARY_CAP:,}\n\n"
-                        f"Unlock a high-salary player or two."
+                        f"❌ Too many locked players.\n\n"
+                        f"- Locked: {len(locks_df)}\n"
+                        f"- Roster size: {roster_size}\n\n"
+                        f"Unlock at least {len(locks_df) - roster_size} player(s)."
                     )
                 else:
-                    with st.spinner("Building lineups with upside + leverage logic..."):
-                        lineups = build_simple_lineups(
-                            df=edited_df,
-                            contest_style=contest_style,
-                            n_lineups=n_lineups,
-                            salary_cap=SALARY_CAP,
-                            roster_size=ROSTER_SIZE,
-                            locked_ids=locked_ids,
-                            excluded_ids=excluded_ids,
-                        )
-
-                    if not lineups:
+                    lock_salary = int(locks_df["salary"].sum()) if not locks_df.empty else 0
+                    if lock_salary > salary_cap:
                         st.error(
-                            "❌ Could not generate any valid lineups.\n\n"
-                            "The builder tried many combinations but could not satisfy:\n"
-                            f"- Roster size = {ROSTER_SIZE}\n"
-                            f"- Salary cap = ${SALARY_CAP:,}\n"
-                            "- Your current locks / excludes\n\n"
-                            "Try:\n"
-                            "• Reducing the number of locked players\n"
-                            "• Removing some excludes\n"
-                            "• Making sure you haven't filtered the player pool too tightly"
+                            f"❌ Salary cap exceeded by locks alone.\n\n"
+                            f"- Locked salary: ${lock_salary:,}\n"
+                            f"- Cap: ${salary_cap:,}\n\n"
+                            f"Unlock a high-salary player or two."
                         )
                     else:
-                        st.session_state["optimal_lineups_results"] = {
-                            "lineups": lineups,
-                            "ran": True,
-                        }
-                        st.success(f"✅ Built {len(lineups)} lineups.")
+                        with st.spinner("Building lineups with upside + leverage logic..."):
+                            lineups = build_simple_lineups(
+                                df=edited_df,
+                                contest_style=contest_style,
+                                n_lineups=n_lineups,
+                                salary_cap=salary_cap,
+                                roster_size=roster_size,
+                                locked_ids=locked_ids,
+                                excluded_ids=excluded_ids,
+                            )
+
+                        if not lineups:
+                            st.error(
+                                "❌ Could not generate any valid lineups.\n\n"
+                                "Random, edge-weighted search could not find any lineup that satisfies:\n"
+                                f"- Roster size = {roster_size}\n"
+                                f"- Salary cap = ${salary_cap:,}\n"
+                                "- Your current locks / excludes\n\n"
+                                "Given the pre-checks, this usually means the locks + high salaries\n"
+                                "are forcing impossible combinations.\n\n"
+                                "Try:\n"
+                                "• Reducing the number of locked players\n"
+                                "• Removing some excludes\n"
+                                "• Increasing the salary cap (if your contest allows it)"
+                            )
+                        else:
+                            st.session_state["optimal_lineups_results"] = {
+                                "lineups": lineups,
+                                "ran": True,
+                            }
+                            st.success(f"✅ Built {len(lineups)} lineups.")
 
     if st.session_state["optimal_lineups_results"].get("ran", False):
         st.markdown("---")
