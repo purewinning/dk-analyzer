@@ -8,7 +8,7 @@ from pandas.api.types import CategoricalDtype
 import streamlit as st
 
 # Import from enhanced builder
-from builder import (
+from builder_enhanced import (
     ownership_bucket,
     build_game_environments,
     build_team_stacks,
@@ -69,18 +69,62 @@ def calculate_ceiling_score(row):
 
 
 def assign_edge_category(row):
-    if row["leverage_score"] > 15 and row["value"] > 4.5:
-        return "🔥 Elite Leverage"
-    elif row["leverage_score"] > 10:
-        return "⭐ High Leverage"
-    elif row["leverage_score"] > 5:
-        return "✅ Good Leverage"
-    elif row["leverage_score"] > -5:
-        return "➖ Neutral"
-    elif row["leverage_score"] > -15:
-        return "⚠️ Slight Chalk"
+    """
+    Assign edge category based on ownership bucket AND leverage.
+    True edge = low ownership + positive leverage OR high ceiling + value.
+    """
+    own = row["own_proj"]
+    leverage = row["leverage_score"]
+    value = row["value"]
+    
+    # Ownership buckets (matches builder.py)
+    PUNT_THR = 10.0
+    CHALK_THR = 30.0
+    MEGA_CHALK_THR = 40.0
+    
+    # Mega Chalk (40%+ owned) - rarely has edge
+    if own >= MEGA_CHALK_THR:
+        if leverage > 20 and value > 5.0:
+            return "🔥 Mega Chalk Edge"  # Rare but possible
+        elif leverage > 5:
+            return "⚠️ Mega Chalk (OK)"
+        else:
+            return "❌ Mega Chalk Trap"
+    
+    # Chalk (30-40% owned)
+    elif own >= CHALK_THR:
+        if leverage > 15 and value > 4.8:
+            return "🔥 Chalk w/ Edge"
+        elif leverage > 5:
+            return "⭐ Chalk (Playable)"
+        else:
+            return "⚠️ Chalk (Low Edge)"
+    
+    # Mid ownership (10-30%)
+    elif own >= PUNT_THR:
+        if leverage > 15 and value > 4.5:
+            return "🔥 Elite Leverage"
+        elif leverage > 10:
+            return "⭐ High Leverage"
+        elif leverage > 5:
+            return "✅ Good Leverage"
+        elif leverage > 0:
+            return "➖ Mid (Neutral)"
+        else:
+            return "➖ Mid (Slight Chalk)"
+    
+    # Punt/Contrarian (< 10% owned) - inherent edge
     else:
-        return "❌ Chalk Trap"
+        if leverage > 10 and value > 4.3:
+            return "🔥 Elite Contrarian"
+        elif leverage > 5:
+            return "💎 Contrarian Edge"
+        elif leverage > 0:
+            return "💎 Contrarian Play"
+        elif value > 4.0:
+            return "✅ Contrarian Value"
+        else:
+            return "⚠️ Punt Risk"
 
 
 def calculate_gpp_score(row):
@@ -551,7 +595,7 @@ def build_enhanced_lineups(
     
     The correlation_strength parameter balances these approaches.
     """
-    from builder import generate_top_n_lineups, LineupTemplate
+    from builder_enhanced import generate_top_n_lineups, LineupTemplate
     
     # Filter out excluded upfront
     pool = df[~df["player_id"].isin(excluded_ids)].copy()
@@ -810,7 +854,7 @@ else:
                         )
                     else:
                         with st.spinner("Building correlated lineups with stacking logic..."):
-                            lineups = build_lineups(
+                            lineups = build_enhanced_lineups(
                                 df=edited_df,
                                 contest_style=contest_style,
                                 correlation_strength=correlation_strength,
