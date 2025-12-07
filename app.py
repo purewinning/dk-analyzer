@@ -3,6 +3,7 @@ from typing import Dict, Any, List
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import CategoricalDtype
 import streamlit as st
 
 from builder import (
@@ -25,13 +26,14 @@ st.set_page_config(
 )
 
 # --------------------------------------------------------------------
-# BASIC CSS TO MIMIC THE STYLED LAYOUT
+# LIGHT CSS – keep it clean
 # --------------------------------------------------------------------
 st.markdown(
     """
     <style>
     .main {
         background-color: #050814;
+        color: #e5e7ff;
     }
     .block-container {
         padding-top: 1.5rem;
@@ -39,39 +41,36 @@ st.markdown(
         max-width: 1200px;
     }
     .dfs-card {
-        background: #0c1220;
-        border-radius: 12px;
-        padding: 1.25rem 1.5rem;
+        background: #0b1020;
+        border-radius: 10px;
+        padding: 1.0rem 1.25rem;
         border: 1px solid #20263b;
-        box-shadow: 0 0 20px rgba(0,0,0,0.45);
-    }
-    .dfs-card h3, .dfs-card h4 {
-        margin-top: 0;
+        margin-bottom: 1rem;
     }
     .dfs-section-title {
         font-size: 0.85rem;
-        letter-spacing: 0.12em;
+        letter-spacing: 0.14em;
         text-transform: uppercase;
         color: #5ce1ff;
         font-weight: 600;
         margin-bottom: 0.35rem;
     }
     .dfs-subtitle {
-        color: #9ca3c7;
-        font-size: 0.90rem;
+        color: #a2a7d4;
+        font-size: 0.92rem;
     }
     .stButton>button {
         border-radius: 999px;
-        background: linear-gradient(90deg, #16a9ff, #04e2b0);
+        background: #2563eb;
         color: white;
         border: none;
         font-weight: 600;
-        height: 3rem;
+        height: 2.6rem;
     }
     [data-testid="stMetric"] {
-        background: #060a14;
-        border-radius: 10px;
-        padding: 0.6rem 0.8rem;
+        background: #050814;
+        border-radius: 8px;
+        padding: 0.45rem 0.7rem;
         border: 1px solid #1e2235;
     }
     </style>
@@ -80,20 +79,20 @@ st.markdown(
 )
 
 # --------------------------------------------------------------------
-# STRATEGY PROFILES (CASH / SE / 3-MAX / 20-MAX / MILLY)
+# STRATEGY PROFILES (how we want lineups to look for each contest)
 # --------------------------------------------------------------------
 STRATEGY_PROFILES: Dict[str, Dict[str, Any]] = {
     "CASH": {
         "name": "Cash Games (50/50, Double-Up)",
         "description": "Beat ~50% of the field. Embrace projection and floor.",
-        "chalk_range": (4, 6),        # >20%
-        "mid_range": (1, 3),          # 10–20%
-        "contrarian_range": (0, 1),   # <10%
+        "chalk_range": (4, 6),        # >20% owned
+        "mid_range": (1, 3),          # 10–20% owned
+        "contrarian_range": (0, 1),   # <10% owned
         "total_own_range": (260, 340),
         "salary_leave_range": (0, 500),
         "core_locks": (4, 6),
         "player_pool_size": (10, 20),
-        "priority": "Projection & floor over uniqueness",
+        "priority": "Projection & floor over uniqueness.",
     },
     "SE": {
         "name": "Single Entry GPP",
@@ -105,11 +104,11 @@ STRATEGY_PROFILES: Dict[str, Dict[str, Any]] = {
         "salary_leave_range": (0, 300),
         "core_locks": (4, 5),
         "player_pool_size": (15, 20),
-        "priority": "Prioritize projection, add one leverage spot",
+        "priority": "Prioritize projection, add one leverage spot.",
     },
     "3MAX": {
         "name": "3-Max GPP",
-        "description": "Three bullets. A little more leverage than SE, still projection-heavy.",
+        "description": "Three bullets. Slightly more leverage than SE, still projection-heavy.",
         "chalk_range": (3, 4),
         "mid_range": (1, 2),
         "contrarian_range": (1, 1),
@@ -117,7 +116,7 @@ STRATEGY_PROFILES: Dict[str, Dict[str, Any]] = {
         "salary_leave_range": (0, 300),
         "core_locks": (4, 5),
         "player_pool_size": (25, 35),
-        "priority": "Projection first, one clear contrarian angle",
+        "priority": "Projection first, one clear contrarian angle.",
     },
     "20MAX": {
         "name": "20-Max GPP",
@@ -129,7 +128,7 @@ STRATEGY_PROFILES: Dict[str, Dict[str, Any]] = {
         "salary_leave_range": (0, 400),
         "core_locks": (3, 5),
         "player_pool_size": (35, 45),
-        "priority": "Stay different but not stupid; one contrarian each lineup",
+        "priority": "Stay different but not stupid; one contrarian each lineup.",
     },
     "MILLIMAX": {
         "name": "Large Field / Milly Maker",
@@ -141,7 +140,7 @@ STRATEGY_PROFILES: Dict[str, Dict[str, Any]] = {
         "salary_leave_range": (0, 800),
         "core_locks": (2, 4),
         "player_pool_size": (45, 60),
-        "priority": "Ceiling and leverage over raw median projection",
+        "priority": "Ceiling and leverage over raw median projection.",
     },
 }
 
@@ -253,20 +252,14 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
             if csv_name in df.columns:
                 actual_map[csv_name] = internal_name
 
-        mapped_internal_names = set(actual_map.values())
-        final_missing_internal = [
-            name for name in required_internal if name not in mapped_internal_names
-        ]
-        if final_missing_internal:
+        mapped_internal = set(actual_map.values())
+        missing = [name for name in required_internal if name not in mapped_internal]
+        if missing:
             st.error("❌ Missing essential columns.")
             st.error("Required: Player, Salary, Position, Team, Opponent")
-            st.error(
-                "Projection column: one of 'Projection', 'PROJECTED FP', or 'Proj'"
-            )
-            st.error(
-                "Ownership column: one of 'Ownership', 'OWNERSHIP %', 'Own', or 'Own%'"
-            )
-            st.error(f"Missing: {', '.join(final_missing_internal)}")
+            st.error("Projection: one of 'Projection', 'PROJECTED FP', or 'Proj'")
+            st.error("Ownership: one of 'Ownership', 'OWNERSHIP %', 'Own', or 'Own%'")
+            st.error(f"Missing: {', '.join(missing)}")
             return pd.DataFrame(columns=empty_df_cols)
 
         df.rename(columns=actual_map, inplace=True)
@@ -335,7 +328,9 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
 
     df["bucket"] = df["own_proj"].apply(ownership_bucket)
     df["value"] = np.where(
-        df["salary"] > 0, (df["proj"] / (df["salary"] / 1000)).round(2), 0.0
+        df["salary"] > 0,
+        (df["proj"] / (df["salary"] / 1000)).round(2),
+        0.0,
     )
 
     df["leverage_score"] = df.apply(calculate_player_leverage, axis=1)
@@ -385,11 +380,10 @@ def color_bucket(s):
 
 def assign_lineup_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Best-effort positional assignment for displaying DK NBA lineups.
-    If we can't make perfect slots, everything falls back to UTIL so
-    you never get a hard error.
+    Soft positional assignment for DK NBA lineups.
+    If it can't find a perfect mapping, everyone defaults to UTIL
+    instead of throwing errors.
     """
-    slots = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
     assigned_players = set()
     slot_assignments: Dict[str, str] = {}
 
@@ -415,7 +409,7 @@ def assign_lineup_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
             return True
         return False
 
-    def get_flexibility(pos_string):
+    def flexibility(pos_string):
         if pd.isna(pos_string):
             return 0
         positions = [p.strip() for p in str(pos_string).split("/")]
@@ -443,7 +437,7 @@ def assign_lineup_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
             success = False
             break
         if slot in specific_slots:
-            eligible["flexibility"] = eligible["positions"].apply(get_flexibility)
+            eligible["flexibility"] = eligible["positions"].apply(flexibility)
             eligible = eligible.sort_values("flexibility")
         chosen = eligible.iloc[0]
         slot_assignments[slot] = chosen["player_id"]
@@ -542,7 +536,7 @@ def display_lineup_results(
     with col3:
         st.metric("Total Ownership", f"{best['total_own']:.1f}%")
     with col4:
-        st.metric("Strategy Fit (lower=better)", f"{best['strategy_penalty']:.1f}")
+        st.metric("Strategy Fit (lower = better)", f"{best['strategy_penalty']:.1f}")
 
     st.markdown("---")
     st.markdown("### 📋 Lineup Summary")
@@ -579,8 +573,10 @@ def display_lineup_results(
     st.markdown("---")
     st.markdown("### 🔍 Detailed Lineup View")
 
-    lineup_options = [f"Lineup {i} (Proj {lu['proj_score']:.2f})" for i, lu in
-                      zip(summary_df.index, scored)]
+    lineup_options = [
+        f"Lineup {i} (Proj {lu['proj_score']:.2f})"
+        for i, lu in enumerate(scored, start=1)
+    ]
     selection = st.selectbox("Choose a lineup to inspect:", lineup_options)
     idx = lineup_options.index(selection)
     chosen = scored[idx]
@@ -588,7 +584,7 @@ def display_lineup_results(
 
     chosen_players = assign_lineup_positions(chosen_players)
     roster_order = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
-    cat_type = pd.CategoricalDtype(roster_order, ordered=True)
+    cat_type = CategoricalDtype(roster_order, ordered=True)
     chosen_players["roster_slot"] = chosen_players["roster_slot"].astype(cat_type)
     chosen_players.sort_values("roster_slot", inplace=True)
 
@@ -630,16 +626,16 @@ def display_lineup_results(
 
 
 # --------------------------------------------------------------------
-# HERO / HEADER
+# HEADER
 # --------------------------------------------------------------------
 st.markdown(
     """
-    <div style="text-align:center; padding-bottom: 1.5rem;">
-      <div style="font-size: 2.1rem; font-weight: 800; color: #e5e7ff; margin-bottom:0.25rem;">
-        NBA DFS <span style="color:#40e3ff;">Strategy Engine</span>
+    <div style="text-align:center; padding-bottom: 1.2rem;">
+      <div style="font-size: 2.0rem; font-weight: 800; color: #e5e7ff; margin-bottom:0.25rem;">
+        NBA DFS <span style="color:#38bdf8;">Strategy Engine</span>
       </div>
       <div class="dfs-subtitle">
-        DraftKings lineup construction architect. Pick the contest, paste your pool, and I’ll build lineups that match a proven strategy profile.
+        Pick the contest. Paste the pool. I’ll build lineups that match a proven construction profile.
       </div>
     </div>
     """,
@@ -647,11 +643,14 @@ st.markdown(
 )
 
 # --------------------------------------------------------------------
-# CONTEST CONFIGURATION CARD (TOP SECTION)
+# CONTEST CONFIGURATION CARD
 # --------------------------------------------------------------------
 with st.container():
     st.markdown('<div class="dfs-card">', unsafe_allow_html=True)
-    st.markdown('<div class="dfs-section-title">Contest Configuration</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="dfs-section-title">Contest Configuration</div>',
+        unsafe_allow_html=True,
+    )
 
     c1, c2, c3, c4 = st.columns([1.4, 1.2, 1.1, 1.1])
 
@@ -679,12 +678,16 @@ with st.container():
     with c3:
         field_band = st.selectbox(
             "Field Size Band",
-            options=["Small (<2K entries)", "Medium (2K–10K)", "Large (10K–50K)", "Massive (50K+)"],
+            options=[
+                "Small (<2K entries)",
+                "Medium (2K–10K)",
+                "Large (10K–50K)",
+                "Massive (50K+)",
+            ],
             index=1,
         )
 
     with c4:
-        # default inside [min_field, max_field]
         default_entries = max(
             entry_fee_info["min_field"],
             min(583, entry_fee_info["max_field"]),
@@ -699,7 +702,9 @@ with st.container():
 
     c5, c6, c7 = st.columns([1.1, 1.1, 1.1])
     with c5:
-        slate_games = st.number_input("Slate Size (Games)", min_value=1, max_value=15, value=9)
+        slate_games = st.number_input(
+            "Slate Size (Games)", min_value=1, max_value=15, value=9
+        )
     with c6:
         payout_structure = st.selectbox(
             "Payout Structure",
@@ -709,7 +714,11 @@ with st.container():
     with c7:
         injury_vol = st.selectbox(
             "Injury Volatility",
-            ["Low – most starters locked in", "Medium – some key players GTD", "High – late news chaos"],
+            [
+                "Low – most starters locked in",
+                "Medium – some key players GTD",
+                "High – late news chaos",
+            ],
             index=1,
         )
 
@@ -735,24 +744,28 @@ with st.container():
     st.markdown("</div>", unsafe_allow_html=True)
 
 # --------------------------------------------------------------------
-# PLAYER POOL CARD (LOAD DATA + EDITOR)
+# PLAYER POOL CARD
 # --------------------------------------------------------------------
 with st.container():
-    st.markdown('<div class="dfs-card" style="margin-top: 1.0rem;">', unsafe_allow_html=True)
-    st.markdown('<div class="dfs-section-title">Player Pool</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dfs-card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="dfs-section-title">Player Pool</div>',
+        unsafe_allow_html=True,
+    )
 
     c_left, c_right = st.columns([1.4, 1])
     with c_left:
         pasted_csv_data = st.text_area(
-            "Paste DK player pool CSV or TSV (including headers):",
+            "Paste DK player pool (CSV/TSV with headers):",
             height=140,
             placeholder="Player\tSalary\tPosition\tTeam\tOpponent\tProjection\tOwnership\n...",
         )
         load_btn = st.button("Load Player Data", key="load_players")
+
     with c_right:
-        st.markdown("**Tips**")
-        st.markmarkdown(
-            "- Use FantasyLabs / RG / Stokastic style exports\n"
+        st.markdown("**Format Tips**")
+        st.markdown(
+            "- Export from Labs / RG / Stokastic\n"
             "- Must include: Player, Salary, Position, Team, Opponent, Projection, Ownership\n"
             "- Ownership can be 0–1 or 0–100%"
         )
@@ -777,6 +790,7 @@ with st.container():
         st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown("#### Editable Player Pool")
+
         col_conf = {
             "Name": st.column_config.TextColumn("Player", disabled=True, width="medium"),
             "edge_category": st.column_config.TextColumn("Edge", disabled=True, width="medium"),
@@ -837,17 +851,19 @@ with st.container():
         locked_ids = edited_df[edited_df["Lock"] == True]["player_id"].tolist()
         excluded_ids = edited_df[edited_df["Exclude"] == True]["player_id"].tolist()
         if locked_ids or excluded_ids:
-            st.caption(f"🔒 Locked: {len(locked_ids)}   •   ❌ Excluded: {len(excluded_ids)}")
+            st.caption(
+                f"🔒 Locked: {len(locked_ids)}   •   ❌ Excluded: {len(excluded_ids)}"
+            )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
 # --------------------------------------------------------------------
-# YOUR STRATEGY – CARDS
+# STRATEGY SUMMARY CARD
 # --------------------------------------------------------------------
 profile = STRATEGY_PROFILES[profile_key]
 
 with st.container():
-    st.markdown('<div class="dfs-card" style="margin-top: 1.0rem;">', unsafe_allow_html=True)
+    st.markdown('<div class="dfs-card">', unsafe_allow_html=True)
     st.markdown(
         f'<div class="dfs-section-title">Your Strategy • {tournament_type} • {int(total_entries):,} entries • {entry_fee_label}</div>',
         unsafe_allow_html=True,
@@ -902,17 +918,20 @@ with st.container():
     st.markdown("</div>", unsafe_allow_html=True)
 
 # --------------------------------------------------------------------
-# LINEUP GENERATION + RESULTS
+# LINEUP GENERATION CARD
 # --------------------------------------------------------------------
 with st.container():
-    st.markdown('<div class="dfs-card" style="margin-top: 1.0rem;">', unsafe_allow_html=True)
-    st.markdown('<div class="dfs-section-title">Generate Lineups</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dfs-card">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="dfs-section-title">Generate Lineups</div>',
+        unsafe_allow_html=True,
+    )
 
     if slate_df.empty:
         st.info("Load a player pool above to enable the lineup builder.")
         st.markdown("</div>", unsafe_allow_html=True)
     else:
-        colA, colB = st.columns([1, 1])
+        colA, colB = st.columns(2)
         with colA:
             n_lineups = st.slider(
                 "Number of Lineups",
@@ -926,7 +945,9 @@ with st.container():
                 value=True,
             )
 
-        run_btn = st.button("Generate Lineups", key="run_builder", use_container_width=True)
+        run_btn = st.button(
+            "Generate Lineups", key="run_builder", use_container_width=True
+        )
 
         if run_btn:
             conflict = set(locked_ids) & set(excluded_ids)
@@ -982,7 +1003,7 @@ with st.container():
                 if not raw_lineups:
                     st.error(
                         "❌ Could not generate any valid lineups. "
-                        "Try reducing locks or exclusions, or check your data."
+                        "Try reducing locks/excludes or widening your player pool."
                     )
                 else:
                     if auto_match:
@@ -1028,4 +1049,5 @@ with st.container():
                 st.session_state["optimal_lineups_results"]["lineups"],
                 profile_key,
             )
+
         st.markdown("</div>", unsafe_allow_html=True)
