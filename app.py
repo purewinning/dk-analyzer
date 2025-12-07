@@ -268,6 +268,7 @@ WINNING_TEMPLATES = {
         }
     }
 }
+
 class TournamentSimulator:
     def __init__(self, slate_df: pd.DataFrame, field_size: int = 10000):
         self.slate_df = slate_df.copy()
@@ -510,14 +511,24 @@ def color_bucket(s):
         color = ''
     return color
 
-def assign_lineup_positions(lineup_df):
+def assign_lineup_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assign roster positions to players in a lineup.
+
+    Uses a small backtracking search to find a valid DK NBA Classic assignment
+    (PG, SG, SF, PF, C, G, F, UTIL). If no valid assignment is found, falls back
+    to putting everyone in UTIL so the lineup can still be displayed.
+    """
+    # DraftKings NBA classic slots
     slots = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
-    assigned_players = set()
-    slot_assignments = {}
-    
-    def can_play_slot(pos_string, slot):
-        positions = [p.strip() for p in pos_string.split('/')]
-        
+    players = lineup_df.copy().reset_index(drop=True)
+
+    def can_play_slot(pos_string: str, slot: str) -> bool:
+        """Check if a player's positions are eligible for a given slot."""
+        if pd.isna(pos_string):
+            return False
+        positions = [p.strip() for p in str(pos_string).split('/')]
+
         if slot == 'PG':
             return 'PG' in positions
         elif slot == 'SG':
@@ -529,27 +540,65 @@ def assign_lineup_positions(lineup_df):
         elif slot == 'C':
             return 'C' in positions
         elif slot == 'G':
+            # Guard flex: PG or SG
             return 'PG' in positions or 'SG' in positions
         elif slot == 'F':
+            # Forward flex: SF or PF
             return 'SF' in positions or 'PF' in positions
         elif slot == 'UTIL':
+            # Anyone can be UTIL
             return True
         return False
-    
-    for slot in slots:
-        available = lineup_df[~lineup_df['player_id'].isin(assigned_players)].copy()
-        eligible = available[available['positions'].apply(lambda x: can_play_slot(x, slot))]
-        
-        if len(eligible) == 0:
-            return None
-            
-        chosen = eligible.iloc[0]
-        slot_assignments[slot] = chosen['player_id']
-        assigned_players.add(chosen['player_id'])
-    
-    result_df = lineup_df.copy()
-    result_df['roster_slot'] = result_df['player_id'].map({v: k for k, v in slot_assignments.items()})
-    
+
+    # Precompute eligibility: for each player, which slots can they play?
+    eligibility: List[List[str]] = []
+    for _, row in players.iterrows():
+        pos = row.get('positions', '')
+        eligible_slots = [slot for slot in slots if can_play_slot(pos, slot)]
+        eligibility.append(eligible_slots)
+
+    # Backtracking search for a valid assignment
+    assignment: Dict[str, int] = {}  # slot -> player index
+    used_players: set = set()
+
+    def backtrack(slot_idx: int) -> bool:
+        if slot_idx == len(slots):
+            return True
+
+        slot = slots[slot_idx]
+
+        # Try players that can play this slot and aren't used yet
+        for i in range(len(players)):
+            if i in used_players:
+                continue
+            if slot not in eligibility[i]:
+                continue
+
+            assignment[slot] = i
+            used_players.add(i)
+
+            if backtrack(slot_idx + 1):
+                return True
+
+            # backtrack
+            used_players.remove(i)
+            del assignment[slot]
+
+        return False
+
+    success = backtrack(0)
+
+    result_df = players.copy()
+
+    if success:
+        # Map player index -> slot
+        idx_to_slot = {player_idx: slot for slot, player_idx in assignment.items()}
+        result_df['roster_slot'] = result_df.index.map(lambda i: idx_to_slot.get(i, 'UTIL'))
+    else:
+        # Fallback: if something goes wrong, still assign a slot
+        # Put everyone at UTIL so the lineup can still be displayed
+        result_df['roster_slot'] = 'UTIL'
+
     return result_df
 
 # --- TAB FUNCTIONS ---
@@ -724,16 +773,32 @@ def display_multiple_lineups(slate_df, template, lineup_list):
 
     lineup_df = slate_df[slate_df['player_id'].isin(selected_lineup_ids)].copy()
     
-    lineup_df = assign_lineup_positions(lineup_df)
-    
-    if lineup_df is None:
-        st.error("❌ Could not assign valid roster positions.")
+    # Show lineup composition before trying to assign positions
+    if len(lineup_df) != 8:
+        st.error(f"❌ Invalid lineup size: {len(lineup_df)} players (expected 8)")
+        st.write("Players in lineup:", lineup_df['Name'].tolist())
         return
+    
+    # Check position diversity
+    position_counts = {}
+    for _, player in lineup_df.iterrows():
+        positions = str(player['positions']).split('/')
+        for pos in positions:
+            pos = pos.strip()
+            position_counts[pos] = position_counts.get(pos, 0) + 1
+    
+    st.caption(f"Position breakdown: {position_counts}")
+    
+    # Assign roster slots (this version never returns None)
+    lineup_df = assign_lineup_positions(lineup_df)
     
     ROSTER_ORDER = ['PG', 'SG', 'SF', 'PF', 'C', 'G', 'F', 'UTIL']
     position_type = pd.CategoricalDtype(ROSTER_ORDER, ordered=True)
     lineup_df['roster_slot'] = lineup_df['roster_slot'].astype(position_type)
     lineup_df.sort_values(by='roster_slot', inplace=True)
+    
+    # Check if we have actuals
+    has_actuals = st.session_state.get('has_actuals', False)
     
     # Choose columns based on whether we have actuals
     if has_actuals and 'actual_pts' in lineup_df.columns and lineup_df['actual_pts'].notna().all():
@@ -752,7 +817,7 @@ def display_multiple_lineups(slate_df, template, lineup_list):
         'bucket': 'CATEGORY'
     }
     
-    if 'actual_pts' in display_cols:
+    if has_actuals and 'actual_pts' in display_cols:
         rename_dict.update({
             'proj': 'Proj Pts',
             'actual_pts': 'Actual Pts',
@@ -787,7 +852,7 @@ def display_multiple_lineups(slate_df, template, lineup_list):
         "value": "{:.2f}"
     }
     
-    if 'Proj Pts' in lineup_df_display.columns and 'Actual Pts' in lineup_df_display.columns:
+    if 'Proj Pts' in lineup_df_display.columns and ('Actual Pts' in lineup_df_display.columns):
         format_dict.update({
             'Proj Pts': '{:.1f}',
             'Actual Pts': '{:.1f}',
@@ -1082,7 +1147,7 @@ def tab_lineup_builder(slate_df, template):
         if st.session_state.get('has_actuals', False):
             st.info("✅ Actual results loaded! They'll be used in lineup analysis.")
             
-            # Add toggle to show/hide actuals in the player table
+            # Add toggle to show/hide actuals in the player table above
             show_actuals_in_table = st.checkbox("Show actual results in player table above", value=False)
             
             if show_actuals_in_table and 'edited_df_with_actuals' in st.session_state:
@@ -1276,6 +1341,8 @@ def tab_lineup_builder(slate_df, template):
             # Post-process: Filter lineups by template requirements
             if use_template_enforcement and top_lineups:
                 valid_lineups = []
+                
+                template_reqs = selected_template['requirements']
                 
                 for lineup in top_lineups:
                     lineup_players = final_df[final_df['player_id'].isin(lineup['player_ids'])]
