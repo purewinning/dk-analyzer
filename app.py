@@ -6,7 +6,7 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
-# Import from builder (this file lives next to app.py)
+# Import from builder (must live next to app.py)
 from builder import (
     ownership_bucket,
     build_game_environments,
@@ -39,18 +39,13 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Normalize DraftKings-style projections CSV into the internal schema.
 
-    Expected common columns (case/space-insensitive):
-      - Player
-      - Salary
-      - Position
-      - Team
-      - Opponent
-      - Projection
-      - Value
-      - Ownership / Ownership %
+    Works with headers like:
+      Player, Salary, Position, Team, Opponent, Projection, Value, Ownership %
+    (case- and space-insensitive).
     """
 
     df = df.copy()
+    # Normalize headers
     df.columns = df.columns.str.strip().str.lower()
 
     # Map DK headers into our internal names
@@ -74,7 +69,7 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
         "value": "Value",
         "ownership": "own_proj",
         "ownership%": "own_proj",
-        "ownership %": "own_proj",     # 👈 your "Ownership %" column
+        "ownership %": "own_proj",   # your CSV: "Ownership %"
         "own": "own_proj",
         "own%": "own_proj",
         "exposure": "own_proj",
@@ -115,12 +110,12 @@ def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
             + "_" + df["Salary"].astype(str)
         )
 
-    # Ensure numeric
+    # Ensure numeric columns
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
     df["proj"] = pd.to_numeric(df["proj"], errors="coerce")
     df["own_proj"] = pd.to_numeric(df.get("own_proj", np.nan), errors="coerce")
 
-    # Drop rows that don't have basic numeric info
+    # Drop rows missing essential numerics
     df = df.dropna(subset=["Salary", "proj"])
 
     # Ensure positions is string
@@ -190,6 +185,11 @@ def compute_player_edge(
     ceiling_mult: float = 1.35,
     leverage_weight: float = 1.0,
 ) -> float:
+    """
+    Simple "edge" metric combining:
+      - ceiling-ish projection
+      - leverage (lower ownership is slightly rewarded)
+    """
     if np.isnan(own_proj):
         own_proj = 5.0
 
@@ -200,6 +200,7 @@ def compute_player_edge(
 
 
 def derive_edge_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds 'edge_score' column."""
     if "proj" not in df.columns:
         df["edge_score"] = 0.0
         return df
@@ -222,6 +223,12 @@ def random_lineup_sample(
     max_attempts: int = 1000,
     require_unique_teams: bool = False,
 ) -> List[int]:
+    """
+    Simple random lineup generator respecting:
+      - roster_size, salary_cap, min_salary
+      - locked players
+      - optional unique-teams constraint
+    """
     if pool.empty:
         return []
 
@@ -271,6 +278,12 @@ def run_monte_carlo_lineups(
     team_stacks=None,
     max_attempts: int = 2000,
 ) -> pd.DataFrame:
+    """
+    Monte Carlo lineup generator:
+      1) random valid lineups
+      2) enforce projection / floor / punt limits
+      3) rank using edge + correlation
+    """
     pool = derive_edge_column(pool)
     pool = add_ownership_bucket_column(pool)
 
@@ -282,7 +295,7 @@ def run_monte_carlo_lineups(
 
     is_nfl = sport == "NFL"
 
-    for _ in range(n_lineups * 10):
+    for _ in range(n_lineups * 10):  # oversample attempts
         if len(results) >= n_lineups:
             break
 
@@ -311,6 +324,7 @@ def run_monte_carlo_lineups(
             if num_punts > max_punts:
                 continue
 
+        # Correlation
         if sport == "NBA":
             corr_score = calculate_lineup_correlation_score(lineup_df, game_envs)
         elif sport == "NFL":
@@ -353,6 +367,7 @@ def run_monte_carlo_lineups(
 # --------------------------------------------------------------------------------------
 
 def sidebar_controls() -> Dict[str, Any]:
+    """Sidebar sliders / inputs."""
     st.sidebar.header("Lineup Builder Controls")
 
     contest_type = st.sidebar.selectbox(
@@ -416,6 +431,7 @@ def sidebar_controls() -> Dict[str, Any]:
         step=10,
     )
 
+    # start loose so we definitely get something
     min_projection = st.sidebar.slider(
         "Min total projection",
         min_value=0.0,
@@ -463,6 +479,7 @@ def sidebar_controls() -> Dict[str, Any]:
 
 
 def show_player_pool(pool: pd.DataFrame, sport: str):
+    """Display normalized player pool with filters."""
     st.subheader("Player Pool (normalized)")
 
     if pool.empty:
@@ -470,7 +487,9 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
         return
 
     pos_dtype = build_position_dtypes(sport)
-    if pos_dtype.categories:
+
+    # FIX: can't test Index directly in if; use len(...)
+    if len(pos_dtype.categories) > 0:
         pool["primary_pos"] = pool["positions"].apply(lambda x: str(x).split("/")[0])
         pool["primary_pos"] = pool["primary_pos"].astype(pos_dtype)
     else:
@@ -498,6 +517,10 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
             if hasattr(filtered["own_bucket"], "cat")
             else sorted(filtered["own_bucket"].dropna().unique())
         )
+    else:
+        buckets = []
+
+    if buckets:
         selected_buckets = st.multiselect(
             "Filter by ownership bucket:",
             options=buckets,
@@ -532,6 +555,7 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
 
 
 def choose_locks(pool: pd.DataFrame) -> List[str]:
+    """Let user lock players by name; returns list of player_ids."""
     if pool.empty:
         return []
 
@@ -590,6 +614,7 @@ def show_team_stacks(team_stacks: Dict[str, List[Dict[str, Any]]], sport: str):
 
 
 def flatten_lineups_for_display(df_lineups: pd.DataFrame, roster_size: int) -> pd.DataFrame:
+    """Flatten lineup records into a readable table."""
     if df_lineups.empty:
         return df_lineups
 
@@ -666,7 +691,7 @@ def run_nfl_lineup_builder(
     else:
         game_envs = {}
 
-    nfl_stacks = build_nfl_stacks(pool)
+    _ = build_nfl_stacks(pool)  # currently not hard-enforcing stacks
 
     df_lineups = run_monte_carlo_lineups(
         pool=pool,
@@ -743,11 +768,13 @@ def main():
         st.info("Please upload a CSV file to begin.")
         return
 
+    # Raw preview so we can see what came in
     raw_df = pd.read_csv(uploaded_file)
     st.subheader("Raw CSV preview")
     st.write(f"Rows: {raw_df.shape[0]}, Columns: {raw_df.shape[1]}")
     st.dataframe(raw_df.head(), use_container_width=True)
 
+    # Normalize into internal format
     df = normalize_df(raw_df)
     if df.empty:
         st.stop()
@@ -828,4 +855,5 @@ def main():
             )
 
 
+# Run Streamlit app
 main()
