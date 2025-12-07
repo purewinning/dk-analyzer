@@ -584,11 +584,11 @@ def build_simple_fallback_lineups(
     salary_cap: int,
     roster_size: int,
     locked_ids: List[str],
-    max_attempts: int = 5000,
+    max_attempts: int = 8000,
 ) -> List[Dict[str, Any]]:
     """
     Simple lineup builder that works without Team/correlation data.
-    Uses projection + value weighting only.
+    Uses smart salary allocation and projection optimization.
     """
     # Validate basics
     locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
@@ -619,91 +619,131 @@ def build_simple_fallback_lineups(
     # Base pool (non-locked)
     base_pool = pool[~pool["player_id"].isin(locked_ids)].copy()
     
-    # Projection floor
+    # Remove total garbage (bottom 5% projection)
     if not base_pool.empty:
-        if contest_style in ["cash", "single_entry"]:
-            q = 0.2
-        else:
-            q = 0.1
-        proj_cutoff = base_pool["proj"].quantile(q)
-        base_pool = base_pool[base_pool["proj"] >= proj_cutoff]
+        proj_floor = base_pool["proj"].quantile(0.05)
+        base_pool = base_pool[base_pool["proj"] >= proj_floor]
     
     if len(base_pool) + len(locks_df) < roster_size:
         return []
     
-    # Score players: projection + value (no ownership if not available)
-    if "own_proj" in base_pool.columns:
-        base_pool["score"] = (
-            weights["proj"] * base_pool["proj"] +
-            weights["gpp"] * base_pool["value"] * 5 -
-            weights["own"] * base_pool["own_proj"]
-        )
-    else:
-        base_pool["score"] = (
-            weights["proj"] * base_pool["proj"] +
-            weights["gpp"] * base_pool["value"] * 5
-        )
+    # Calculate target salary per remaining slot
+    remaining_cap = salary_cap - lock_salary
+    remaining_slots = roster_size - len(locks_df)
+    target_salary_per_slot = remaining_cap / remaining_slots if remaining_slots > 0 else 0
     
-    # Shift scores to be positive for probability weighting
-    min_score = base_pool["score"].min()
-    base_pool["score"] = base_pool["score"] - min_score + 1.0
-    
-    # Prepare for sampling
-    base_ids = base_pool["player_id"].to_numpy()
-    scores = base_pool["score"].to_numpy()
-    probs = scores / scores.sum()
+    # Minimum salary usage (95% of cap for cash, 90% for GPP)
+    min_salary = salary_cap * (0.95 if contest_style == "cash" else 0.90)
+    max_salary_left = salary_cap - min_salary
     
     lineups: List[Dict[str, Any]] = []
     seen_sets = set()
     rng = np.random.default_rng(42)
     
-    # Generate lineups
-    for _ in range(max_attempts):
+    # Generate lineups with proper salary allocation
+    attempts = 0
+    while len(lineups) < n_lineups and attempts < max_attempts:
+        attempts += 1
+        
         # Start with locks
         lineup_ids = list(locks_df["player_id"])
         current_salary = lock_salary
+        remaining = roster_size - len(lineup_ids)
         
-        slots_left = roster_size - len(lineup_ids)
-        if slots_left <= 0:
+        if remaining <= 0:
             break
         
-        if len(base_ids) < slots_left:
-            break
+        # Build lineup with smart salary allocation
+        available = base_pool[~base_pool["player_id"].isin(lineup_ids)].copy()
         
-        # Sample players
-        try:
-            chosen_idx = rng.choice(len(base_ids), size=slots_left, replace=False, p=probs)
-            chosen_ids = base_ids[chosen_idx]
+        # For each remaining slot, pick from appropriate salary tier
+        for slot_num in range(remaining):
+            if available.empty:
+                break
             
-            # Check salary
-            chosen_df = base_pool[base_pool["player_id"].isin(chosen_ids)]
-            total_salary = current_salary + int(chosen_df["salary"].sum())
+            slots_left_after = remaining - slot_num - 1
+            cap_left = salary_cap - current_salary
             
-            if total_salary <= salary_cap:
-                lineup_ids.extend(list(chosen_ids))
-                
-                # Check uniqueness
-                key = tuple(sorted(lineup_ids))
-                if key not in seen_sets:
-                    seen_sets.add(key)
-                    
-                    # Calculate lineup stats
-                    lineup_df = pool[pool["player_id"].isin(lineup_ids)]
-                    proj_score = float(lineup_df["proj"].sum())
-                    
-                    lineups.append({
-                        "player_ids": lineup_ids,
-                        "proj_score": proj_score,
-                        "salary_used": total_salary,
-                        "correlation_score": 0.0,  # No correlation in fallback
-                        "num_games": 0,
-                        "num_teams": 0,
-                    })
-                    
-                    if len(lineups) >= n_lineups:
-                        break
-        except:
+            # Calculate salary range for this slot
+            if slots_left_after > 0:
+                # Leave enough for remaining slots (at least $3500 per slot)
+                max_this_slot = cap_left - (slots_left_after * 3500)
+                min_this_slot = max(3500, cap_left - (slots_left_after * 11000))
+            else:
+                # Last slot - use all remaining
+                max_this_slot = cap_left
+                min_this_slot = max(3500, cap_left - max_salary_left)
+            
+            # Filter to valid salary range
+            candidates = available[
+                (available["salary"] >= min_this_slot) &
+                (available["salary"] <= max_this_slot)
+            ].copy()
+            
+            if candidates.empty:
+                # Relax constraints if needed
+                candidates = available[available["salary"] <= cap_left].copy()
+            
+            if candidates.empty:
+                break
+            
+            # Score candidates (projection-focused with value boost)
+            if "own_proj" in candidates.columns:
+                candidates["score"] = (
+                    candidates["proj"] * 1.0 +
+                    candidates["value"] * 2.0 -
+                    candidates["own_proj"] * 0.05
+                )
+            else:
+                candidates["score"] = (
+                    candidates["proj"] * 1.0 +
+                    candidates["value"] * 2.0
+                )
+            
+            # Add randomness
+            candidates["score"] = candidates["score"] * (0.85 + rng.random(len(candidates)) * 0.3)
+            
+            # Pick best scoring candidate
+            best = candidates.nlargest(1, "score")
+            if best.empty:
+                break
+            
+            chosen = best.iloc[0]
+            lineup_ids.append(chosen["player_id"])
+            current_salary += int(chosen["salary"])
+            
+            # Remove chosen from available
+            available = available[available["player_id"] != chosen["player_id"]]
+        
+        # Validate lineup
+        if len(lineup_ids) != roster_size:
             continue
+        
+        # Check salary usage
+        if current_salary > salary_cap:
+            continue
+        
+        if salary_cap - current_salary > max_salary_left:
+            continue  # Left too much money on table
+        
+        # Check uniqueness
+        key = tuple(sorted(lineup_ids))
+        if key in seen_sets:
+            continue
+        seen_sets.add(key)
+        
+        # Calculate lineup stats
+        lineup_df = pool[pool["player_id"].isin(lineup_ids)]
+        proj_score = float(lineup_df["proj"].sum())
+        
+        lineups.append({
+            "player_ids": lineup_ids,
+            "proj_score": proj_score,
+            "salary_used": current_salary,
+            "correlation_score": 0.0,
+            "num_games": 0,
+            "num_teams": 0,
+        })
     
     # Sort by projection
     lineups = sorted(lineups, key=lambda x: x["proj_score"], reverse=True)
