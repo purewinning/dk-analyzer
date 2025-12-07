@@ -6,18 +6,15 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
-from builder import (
-    ownership_bucket,
-    DEFAULT_SALARY_CAP,
-    DEFAULT_ROSTER_SIZE,
-)
+from builder import ownership_bucket  # ONLY this; no DEFAULT_* surprises
 
 # -------------------------------------------------------------------
-# BASIC CONFIG
+# BASIC CONFIG / NBA RULES
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="NBA DFS Lineup Builder")
 
-MIN_GAMES_REQUIRED = 2  # kept for future, not used directly now
+SALARY_CAP = 50000   # DraftKings NBA classic
+ROSTER_SIZE = 8      # PG, SG, SF, PF, C, G, F, UTIL
 
 # -------------------------------------------------------------------
 # CSV MAPPING / EDGE CALCS
@@ -513,8 +510,6 @@ def build_simple_lineups(
 
     weights = get_edge_weights(contest_style)
 
-    # gpp_score can be 0–100; scale it down so it's in the same ballpark
-    # as projection, then apply weights.
     pool["edge_score_base"] = (
         weights["proj"] * pool["proj"]
         + weights["gpp"] * (pool["gpp_score"] / 3.0)
@@ -624,7 +619,7 @@ n_lineups = st.sidebar.slider(
 )
 
 contest_style = get_builder_style(contest_type_label, int(field_size))
-st.sidebar.caption(f"Build style: **{contest_style}** (weights proj / upside / leverage / ownership)")
+st.sidebar.caption(f"Build style: **{contest_style}** (proj + upside + leverage – ownership)")
 
 st.sidebar.markdown("---")
 pasted_csv_data = st.sidebar.text_area(
@@ -735,35 +730,65 @@ else:
     run_btn = st.button("Generate Lineups", type="primary")
 
     if run_btn:
-        conflict = set(locked_ids) & set(excluded_ids)
-        if conflict:
+        # Pre-flight sanity checks to avoid mysterious "no valid lineups"
+        pool_for_check = edited_df[~edited_df["player_id"].isin(excluded_ids)]
+
+        if len(pool_for_check) < ROSTER_SIZE:
             st.error(
-                f"❌ Conflict: {', '.join(sorted(conflict))} are both locked and excluded."
+                f"❌ Not enough players to build a full lineup.\n\n"
+                f"- Players available after excludes: {len(pool_for_check)}\n"
+                f"- Required for NBA DK: {ROSTER_SIZE}\n\n"
+                f"Remove some excludes or load a larger pool."
             )
         else:
-            with st.spinner("Building lineups with upside + leverage logic..."):
-                lineups = build_simple_lineups(
-                    df=edited_df,
-                    contest_style=contest_style,
-                    n_lineups=n_lineups,
-                    salary_cap=DEFAULT_SALARY_CAP,
-                    roster_size=DEFAULT_ROSTER_SIZE,
-                    locked_ids=locked_ids,
-                    excluded_ids=excluded_ids,
-                )
+            locks_df = pool_for_check[pool_for_check["player_id"].isin(locked_ids)]
 
-            if not lineups:
+            if len(locks_df) > ROSTER_SIZE:
                 st.error(
-                    "❌ Could not generate any valid lineups.\n\n"
-                    "Even with edge-based logic, locks + salary + roster size could not be satisfied.\n"
-                    "Try reducing locks/excludes or broadening your pool."
+                    f"❌ Too many locked players.\n\n"
+                    f"- Locked: {len(locks_df)}\n"
+                    f"- Roster size: {ROSTER_SIZE}\n\n"
+                    f"Unlock at least {len(locks_df) - ROSTER_SIZE} player(s)."
                 )
             else:
-                st.session_state["optimal_lineups_results"] = {
-                    "lineups": lineups,
-                    "ran": True,
-                }
-                st.success(f"✅ Built {len(lineups)} lineups.")
+                lock_salary = int(locks_df["salary"].sum()) if not locks_df.empty else 0
+                if lock_salary > SALARY_CAP:
+                    st.error(
+                        f"❌ Salary cap exceeded by locks alone.\n\n"
+                        f"- Locked salary: ${lock_salary:,}\n"
+                        f"- Cap: ${SALARY_CAP:,}\n\n"
+                        f"Unlock a high-salary player or two."
+                    )
+                else:
+                    with st.spinner("Building lineups with upside + leverage logic..."):
+                        lineups = build_simple_lineups(
+                            df=edited_df,
+                            contest_style=contest_style,
+                            n_lineups=n_lineups,
+                            salary_cap=SALARY_CAP,
+                            roster_size=ROSTER_SIZE,
+                            locked_ids=locked_ids,
+                            excluded_ids=excluded_ids,
+                        )
+
+                    if not lineups:
+                        st.error(
+                            "❌ Could not generate any valid lineups.\n\n"
+                            "The builder tried many combinations but could not satisfy:\n"
+                            f"- Roster size = {ROSTER_SIZE}\n"
+                            f"- Salary cap = ${SALARY_CAP:,}\n"
+                            "- Your current locks / excludes\n\n"
+                            "Try:\n"
+                            "• Reducing the number of locked players\n"
+                            "• Removing some excludes\n"
+                            "• Making sure you haven't filtered the player pool too tightly"
+                        )
+                    else:
+                        st.session_state["optimal_lineups_results"] = {
+                            "lineups": lineups,
+                            "ran": True,
+                        }
+                        st.success(f"✅ Built {len(lineups)} lineups.")
 
     if st.session_state["optimal_lineups_results"].get("ran", False):
         st.markdown("---")
