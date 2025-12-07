@@ -544,18 +544,20 @@ def get_correlation_strength(contest_label: str) -> float:
     """
     How aggressively to build stacks based on contest type.
     0.0 = no correlation, 1.0 = maximum stacking.
+    
+    Updated with more conservative defaults for better lineup generation.
     """
     if contest_label == "Cash Game (50/50, Double-Up)":
-        return 0.2  # Light correlation for safety
+        return 0.15  # Very light correlation for safety
     if contest_label == "Single Entry":
-        return 0.5  # Moderate stacking
+        return 0.4  # Moderate stacking
     if contest_label == "3-Max":
-        return 0.6  # More aggressive
+        return 0.5  # Balanced
     if contest_label == "20-Max":
-        return 0.75  # High correlation for differentiation
+        return 0.6  # Good correlation without being too strict
     if contest_label == "150-Max (Milly Maker)":
-        return 0.85  # Maximum stacking for upside
-    return 0.5
+        return 0.7  # Strong stacking but not extreme
+    return 0.4
 
 
 def get_edge_weights(contest_style: str) -> Dict[str, float]:
@@ -573,6 +575,139 @@ def get_edge_weights(contest_style: str) -> Dict[str, float]:
     if contest_style == "milly":
         return {"proj": 0.6, "gpp": 1.0, "own": 0.18}
     return {"proj": 0.9, "gpp": 0.5, "own": 0.05}
+
+
+def build_simple_fallback_lineups(
+    pool: pd.DataFrame,
+    contest_style: str,
+    n_lineups: int,
+    salary_cap: int,
+    roster_size: int,
+    locked_ids: List[str],
+    max_attempts: int = 5000,
+) -> List[Dict[str, Any]]:
+    """
+    Simple lineup builder that works without Team/correlation data.
+    Uses projection + value weighting only.
+    """
+    # Validate basics
+    locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
+    if len(locks_df) > roster_size:
+        return []
+    
+    lock_salary = int(locks_df["salary"].sum()) if not locks_df.empty else 0
+    if lock_salary > salary_cap:
+        return []
+    
+    # Ensure basic columns
+    for col in ["proj", "salary"]:
+        if col not in pool.columns:
+            return []
+        pool[col] = pool[col].fillna(0)
+    
+    # Calculate value if not present
+    if "value" not in pool.columns:
+        pool["value"] = np.where(
+            pool["salary"] > 0,
+            (pool["proj"] / (pool["salary"] / 1000)).round(2),
+            0.0
+        )
+    
+    # Get weights
+    weights = get_edge_weights(contest_style)
+    
+    # Base pool (non-locked)
+    base_pool = pool[~pool["player_id"].isin(locked_ids)].copy()
+    
+    # Projection floor
+    if not base_pool.empty:
+        if contest_style in ["cash", "single_entry"]:
+            q = 0.2
+        else:
+            q = 0.1
+        proj_cutoff = base_pool["proj"].quantile(q)
+        base_pool = base_pool[base_pool["proj"] >= proj_cutoff]
+    
+    if len(base_pool) + len(locks_df) < roster_size:
+        return []
+    
+    # Score players: projection + value (no ownership if not available)
+    if "own_proj" in base_pool.columns:
+        base_pool["score"] = (
+            weights["proj"] * base_pool["proj"] +
+            weights["gpp"] * base_pool["value"] * 5 -
+            weights["own"] * base_pool["own_proj"]
+        )
+    else:
+        base_pool["score"] = (
+            weights["proj"] * base_pool["proj"] +
+            weights["gpp"] * base_pool["value"] * 5
+        )
+    
+    # Shift scores to be positive for probability weighting
+    min_score = base_pool["score"].min()
+    base_pool["score"] = base_pool["score"] - min_score + 1.0
+    
+    # Prepare for sampling
+    base_ids = base_pool["player_id"].to_numpy()
+    scores = base_pool["score"].to_numpy()
+    probs = scores / scores.sum()
+    
+    lineups: List[Dict[str, Any]] = []
+    seen_sets = set()
+    rng = np.random.default_rng(42)
+    
+    # Generate lineups
+    for _ in range(max_attempts):
+        # Start with locks
+        lineup_ids = list(locks_df["player_id"])
+        current_salary = lock_salary
+        
+        slots_left = roster_size - len(lineup_ids)
+        if slots_left <= 0:
+            break
+        
+        if len(base_ids) < slots_left:
+            break
+        
+        # Sample players
+        try:
+            chosen_idx = rng.choice(len(base_ids), size=slots_left, replace=False, p=probs)
+            chosen_ids = base_ids[chosen_idx]
+            
+            # Check salary
+            chosen_df = base_pool[base_pool["player_id"].isin(chosen_ids)]
+            total_salary = current_salary + int(chosen_df["salary"].sum())
+            
+            if total_salary <= salary_cap:
+                lineup_ids.extend(list(chosen_ids))
+                
+                # Check uniqueness
+                key = tuple(sorted(lineup_ids))
+                if key not in seen_sets:
+                    seen_sets.add(key)
+                    
+                    # Calculate lineup stats
+                    lineup_df = pool[pool["player_id"].isin(lineup_ids)]
+                    proj_score = float(lineup_df["proj"].sum())
+                    
+                    lineups.append({
+                        "player_ids": lineup_ids,
+                        "proj_score": proj_score,
+                        "salary_used": total_salary,
+                        "correlation_score": 0.0,  # No correlation in fallback
+                        "num_games": 0,
+                        "num_teams": 0,
+                    })
+                    
+                    if len(lineups) >= n_lineups:
+                        break
+        except:
+            continue
+    
+    # Sort by projection
+    lineups = sorted(lineups, key=lambda x: x["proj_score"], reverse=True)
+    return lineups[:n_lineups]
 
 
 def build_enhanced_lineups(
@@ -600,21 +735,30 @@ def build_enhanced_lineups(
     # Filter out excluded upfront
     pool = df[~df["player_id"].isin(excluded_ids)].copy()
     
-    # Ensure required columns exist for correlation
-    required_cols = ["player_id", "salary", "proj", "GameID", "Team"]
-    missing_cols = [col for col in required_cols if col not in pool.columns]
-    if missing_cols:
-        st.error(f"❌ Missing required columns for correlation: {', '.join(missing_cols)}")
-        st.error("Make sure your CSV has Team and Opponent columns!")
-        return []
+    # Check if we have columns needed for correlation
+    has_team_data = "Team" in pool.columns and "GameID" in pool.columns
+    has_correlation_cols = all(col in pool.columns for col in ["ceiling", "value", "own_proj"])
     
-    # Ensure correlation helper columns exist
-    correlation_cols = ["ceiling", "value", "own_proj"]
-    missing_corr = [col for col in correlation_cols if col not in pool.columns]
-    if missing_corr:
-        st.error(f"❌ Missing columns needed for correlation: {', '.join(missing_corr)}")
-        st.error("This shouldn't happen - data preprocessing may have failed.")
-        return []
+    # If missing correlation data, warn and fall back to simpler building
+    if not has_team_data or not has_correlation_cols:
+        missing = []
+        if not has_team_data:
+            missing.append("Team/Opponent")
+        if not has_correlation_cols:
+            missing.append("edge metrics")
+        
+        st.warning(f"⚠️ Missing {', '.join(missing)} - using simplified lineup building without correlation")
+        st.info("💡 For correlation/stacking, your CSV needs: Player, Salary, Position, Team, Opponent, Projection, Ownership")
+        
+        # Fall back to basic building
+        return build_simple_fallback_lineups(
+            pool=pool,
+            contest_style=contest_style,
+            n_lineups=n_lineups,
+            salary_cap=salary_cap,
+            roster_size=roster_size,
+            locked_ids=locked_ids,
+        )
     
     # Validate locks
     locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
