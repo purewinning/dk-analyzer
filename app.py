@@ -1098,7 +1098,22 @@ def build_nfl_lineups(
 # -------------------------------------------------------------------
 
 # Sidebar – simple controls
-st.sidebar.title("Contest Settings")
+st.sidebar.title("Settings")
+
+# Sport selector
+sport_mode = st.sidebar.selectbox(
+    "⚙️ Sport",
+    options=["Auto-Detect", "NBA", "NFL"],
+    index=0,
+    help="Auto-Detect reads positions from your CSV. Override if needed."
+)
+
+# If manual override, update session state
+if sport_mode != "Auto-Detect":
+    st.session_state["sport"] = sport_mode
+
+st.sidebar.divider()
+st.sidebar.subheader("Contest Settings")
 
 contest_type_label = st.sidebar.selectbox(
     "Contest Type",
@@ -1128,7 +1143,12 @@ salary_cap = st.sidebar.number_input(
     step=5000,
 )
 
-roster_size = DEFAULT_ROSTER_SIZE
+# Dynamic roster size based on sport
+detected_sport = st.session_state.get("sport", "NBA")
+if detected_sport == "NFL":
+    roster_size = 9
+else:
+    roster_size = 8
 
 default_n = get_default_n_lineups(contest_type_label)
 n_lineups = st.sidebar.slider(
@@ -1140,13 +1160,20 @@ n_lineups = st.sidebar.slider(
 
 # NEW: Correlation strength control
 default_corr = get_correlation_strength(contest_type_label)
+
+# Sport-specific help text
+if detected_sport == "NFL":
+    corr_help = "NFL: Higher = more QB stacking + RB/DST correlation. Lower = flexible roster."
+else:
+    corr_help = "NBA: Higher = more game/team stacking. Lower = spread across games."
+
 correlation_strength = st.sidebar.slider(
     "Correlation/Stacking Strength",
     min_value=0.0,
     max_value=1.0,
     value=default_corr,
     step=0.05,
-    help="Higher = more aggressive stacking for upside. Lower = more balanced/safe.",
+    help=corr_help,
 )
 
 contest_style = get_builder_style(contest_type_label, int(field_size))
@@ -1154,6 +1181,30 @@ st.sidebar.caption(
     f"Build style: **{contest_style}**\n\n"
     f"Correlation: **{int(correlation_strength * 100)}%** (stacking intensity)"
 )
+
+# Sport-specific strategy info
+st.sidebar.divider()
+if detected_sport == "NFL":
+    with st.sidebar.expander("🏈 NFL Stacking Logic"):
+        st.markdown("""
+        **Active:**
+        - ✅ QB + Pass Catchers
+        - ✅ RB + DST (same team)
+        - ✅ Game stacks + bring-backs
+        
+        **Avoided:**
+        - ❌ QB vs opposing DST
+        - ❌ WR vs opposing DST
+        """)
+else:
+    with st.sidebar.expander("🏀 NBA Stacking Logic"):
+        st.markdown("""
+        **Active:**
+        - ✅ Game stacks (high totals)
+        - ✅ Team stacks (2-3 players)
+        - ✅ Bring-backs (opposing team)
+        - ✅ Flexible roster building
+        """)
 
 st.sidebar.markdown("---")
 pasted_csv_data = st.sidebar.text_area(
@@ -1193,6 +1244,12 @@ if load_btn:
 detected_sport = st.session_state.get("sport", "NBA")
 sport_emoji = "🏀" if detected_sport == "NBA" else "🏈"
 st.title(f"{sport_emoji} {detected_sport} DFS Lineup Builder (Enhanced Correlation)")
+
+# Show sport mode
+if sport_mode == "Auto-Detect":
+    st.caption(f"📡 Auto-detected: **{detected_sport}** | Roster: {roster_size} players")
+else:
+    st.caption(f"🔧 Manual override: **{detected_sport}** | Roster: {roster_size} players")
 
 slate_df = st.session_state["slate_df"]
 
