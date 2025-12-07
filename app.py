@@ -810,7 +810,7 @@ else:
                         )
                     else:
                         with st.spinner("Building correlated lineups with stacking logic..."):
-                            lineups = build_enhanced_lineups(
+                            lineups = build_lineups(
                                 df=edited_df,
                                 contest_style=contest_style,
                                 correlation_strength=correlation_strength,
