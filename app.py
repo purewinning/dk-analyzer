@@ -8,7 +8,7 @@ from pandas.api.types import CategoricalDtype
 import streamlit as st
 
 # Import from enhanced builder
-from builder_enhanced import (
+from builder import (
     ownership_bucket,
     build_game_environments,
     build_team_stacks,
