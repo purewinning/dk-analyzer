@@ -6,12 +6,15 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
+# Import from builder (this file lives next to app.py)
 from builder import (
     ownership_bucket,
     build_game_environments,
     build_team_stacks,
     calculate_lineup_correlation_score,
 )
+
+# NFL-specific logic
 from nfl_stacks import (
     build_nfl_stacks,
     identify_nfl_bringback,
@@ -19,15 +22,19 @@ from nfl_stacks import (
     calculate_nfl_correlation_score,
 )
 
+# --------------------------------------------------------------------------------------
+# STREAMLIT CONFIG
+# --------------------------------------------------------------------------------------
+
 st.set_page_config(
     page_title="DFS Lineup Explorer (Enhanced)",
     layout="wide"
 )
 
-st.write("✅ App booted to top-level")  # <-- add this
+# --------------------------------------------------------------------------------------
+# COLUMN NAME NORMALIZATION
+# --------------------------------------------------------------------------------------
 
-
-# Column mapping constants
 PLAYER_ID_COLS = ["Id", "ID", "Player ID", "PlayerID"]
 NAME_COLS = ["Name", "Player", "Player Name"]
 TEAM_COLS = ["Team", "Tm"]
@@ -39,9 +46,7 @@ OWNERSHIP_COLS = ["Ownership", "Own", "Exposure", "Proj Own", "Own%"]
 
 
 def normalize_column(df: pd.DataFrame, possible_names: List[str], new_name: str) -> pd.DataFrame:
-    """
-    Rename any matching columns from possible_names to new_name if found.
-    """
+    """Rename any matching columns from possible_names to new_name if found."""
     for col in possible_names:
         if col in df.columns:
             df = df.rename(columns={col: new_name})
@@ -50,9 +55,7 @@ def normalize_column(df: pd.DataFrame, possible_names: List[str], new_name: str)
 
 
 def load_and_normalize_csv(file: io.BytesIO) -> pd.DataFrame:
-    """
-    Load CSV, normalize columns and perform basic cleanup.
-    """
+    """Load CSV, normalize columns and perform basic cleanup."""
     df = pd.read_csv(file)
 
     # Normalize columns
@@ -65,32 +68,27 @@ def load_and_normalize_csv(file: io.BytesIO) -> pd.DataFrame:
     df = normalize_column(df, PROJECTION_COLS, "proj")
     df = normalize_column(df, OWNERSHIP_COLS, "own_proj")
 
-    # Basic checks
     required = ["player_id", "Name", "Team", "positions", "Salary", "proj"]
     missing = [col for col in required if col not in df.columns]
     if missing:
         st.error(f"CSV is missing required columns: {missing}")
         return pd.DataFrame()
 
-    # Fill or handle optional columns
     if "own_proj" not in df.columns:
         df["own_proj"] = np.nan
 
-    # Ensure types
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
     df["proj"] = pd.to_numeric(df["proj"], errors="coerce")
     df["own_proj"] = pd.to_numeric(df["own_proj"], errors="coerce")
 
-    df = df.dropna(subset=["Salary", "proj"])  # must have these
+    df = df.dropna(subset=["Salary", "proj"])
     df["positions"] = df["positions"].astype(str)
 
     return df
 
 
 def add_ownership_bucket_column(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds an 'own_bucket' column to df using the ownership_bucket function from builder.
-    """
+    """Add 'own_bucket' column based on projected ownership."""
     if "own_proj" not in df.columns:
         df["own_bucket"] = "Unknown"
         return df
@@ -101,23 +99,15 @@ def add_ownership_bucket_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_positions(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For NBA data, we often have "PG/SG" style multi-position strings;
-    we keep the raw 'positions' but create a primary_pos for convenience.
-    """
-    # Keep full positions
+    """Create 'primary_pos' from multi-position strings like 'PG/SG'."""
     if "positions" not in df.columns:
         return df
-
     df["primary_pos"] = df["positions"].apply(lambda x: str(x).split("/")[0])
     return df
 
 
 def detect_sport(df: pd.DataFrame) -> str:
-    """
-    Detect sport type from position data.
-    Returns: "NBA", "NFL", or "UNKNOWN"
-    """
+    """Detect sport type from position data."""
     if df.empty or "positions" not in df.columns:
         return "UNKNOWN"
 
@@ -127,7 +117,6 @@ def detect_sport(df: pd.DataFrame) -> str:
             for p in val.replace(" ", "").split("/"):
                 all_positions.add(p.upper())
 
-    # Quick heuristics
     nfl_positions = {"QB", "RB", "WR", "TE", "DST", "DEF"}
     nba_positions = {"PG", "SG", "SF", "PF", "C"}
 
@@ -135,27 +124,23 @@ def detect_sport(df: pd.DataFrame) -> str:
         return "NFL"
     if all_positions & nba_positions:
         return "NBA"
-
     return "UNKNOWN"
 
 
 def build_position_dtypes(sport: str):
-    """
-    Provide an ordered position dtype for NBA or NFL (for nicer sorting).
-    """
+    """Provide an ordered position dtype for nicer sorting."""
     if sport == "NBA":
         pos_order = ["PG", "SG", "SF", "PF", "C"]
     elif sport == "NFL":
         pos_order = ["QB", "RB", "WR", "TE", "DST"]
     else:
         pos_order = []
-
     return CategoricalDtype(categories=pos_order, ordered=True)
 
 
-# ======================================================================================
-# LINEUP BUILDING/MONTE CARLO HELPERS (SPORT-AGNOSTIC BASE + SPORT-SPECIFIC LOGIC)
-# ======================================================================================
+# --------------------------------------------------------------------------------------
+# EDGE METRIC + MONTE CARLO LINEUP GENERATION
+# --------------------------------------------------------------------------------------
 
 def compute_player_edge(
     proj: float,
@@ -164,30 +149,21 @@ def compute_player_edge(
     leverage_weight: float = 1.0,
 ) -> float:
     """
-    Extremely simple "edge" metric combining:
-      - Weighted projection (ceiling-ish)
-      - Leverage (how under-owned relative to some reference)
+    Simple "edge" metric combining:
+      - ceiling-ish projection
+      - leverage (lower ownership is slightly rewarded)
     """
-    # If ownership is missing, treat as small contrarian
     if np.isnan(own_proj):
         own_proj = 5.0
 
-    # Basic "ceiling" style projection
     ceiling = proj * ceiling_mult
+    leverage_score = (30.0 - min(own_proj, 30.0)) / 30.0  # 0..1 (lower own => higher score)
 
-    # "Leverage" – if own is small, we slightly reward this
-    # Example: 5% vs 25% might be more interesting
-    # We'll transform own_proj such that smaller is better
-    leverage_score = (30.0 - min(own_proj, 30.0)) / 30.0  # 0..1
-
-    # Weighted combination
     return ceiling + leverage_weight * 3.0 * leverage_score
 
 
 def derive_edge_column(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds a 'edge_score' column used for sorting / tie-breaking in lineup construction.
-    """
+    """Adds 'edge_score' column."""
     if "proj" not in df.columns:
         df["edge_score"] = 0.0
         return df
@@ -212,13 +188,10 @@ def random_lineup_sample(
 ) -> List[int]:
     """
     Very simple random lineup generator that respects:
-      - roster_size
-      - salary_cap
-      - min_salary
-      - locked players (by player_id)
-      - optional "unique teams" flag
-
-    Returns a list of row indices from 'pool' that form a lineup, or [] if failed.
+      - roster_size, salary_cap, min_salary
+      - locked players
+      - optional "unique teams" constraint
+    Returns list of row indices in `pool`, or [] if failed.
     """
     if pool.empty:
         return []
@@ -231,10 +204,7 @@ def random_lineup_sample(
         if remaining_slots < 0:
             return []
 
-        # Start with locked players
         chosen = list(locked_indices)
-
-        # Randomly sample from rest
         available = [ix for ix in indices if ix not in chosen]
         if len(available) < remaining_slots:
             continue
@@ -247,7 +217,6 @@ def random_lineup_sample(
         if total_salary > salary_cap or total_salary < min_salary:
             continue
 
-        # Optional team uniqueness constraint – mainly interesting for NFL
         if require_unique_teams:
             if lineup_df["Team"].nunique() < roster_size:
                 continue
@@ -274,32 +243,25 @@ def run_monte_carlo_lineups(
     max_attempts: int = 2000,
 ) -> pd.DataFrame:
     """
-    A simple Monte Carlo lineup "generator" that:
+    Monte Carlo lineup generator:
       1) randomly samples valid lineups
-      2) keeps those with reasonable total projection and not too many punts
-      3) is edge-aware (through "edge_score" + an approximate correlation score)
+      2) enforces projection / floor / punt limits
+      3) uses edge + correlation for ranking
     """
-
-    # Pre-calc edge_score
     pool = derive_edge_column(pool)
     pool = add_ownership_bucket_column(pool)
 
-    # We'll store lineups in a list of dicts
     results = []
-
-    # Build positional columns once
-    essential_cols = ["player_id", "Name", "Team", "Opponent", "positions", "Salary", "proj", "own_proj", "edge_score"]
+    essential_cols = [
+        "player_id", "Name", "Team", "Opponent",
+        "positions", "Salary", "proj", "own_proj", "edge_score",
+    ]
 
     is_nfl = sport == "NFL"
 
-    for _ in range(n_lineups * 10):  # oversample attempts to get enough valid lineups
+    for _ in range(n_lineups * 10):  # oversample attempts
         if len(results) >= n_lineups:
             break
-
-        # For NFL, we might require some stacking logic
-        if is_nfl and game_envs is not None:
-            # We will just use a random game stack approach – real logic lives in nfl_stacks
-            pass
 
         chosen = random_lineup_sample(
             pool=pool,
@@ -313,32 +275,27 @@ def run_monte_carlo_lineups(
             continue
 
         lineup_df = pool.loc[chosen].copy()
-
-        # Basic constraints
         total_proj = lineup_df["proj"].sum()
         if total_proj < min_projection:
             continue
 
-        # Rough "floor" – we could use proj * 0.7 or something; for now we just reuse
         total_floor = total_proj * 0.7
         if total_floor < min_floor:
             continue
 
-        # Count punts
         if "own_bucket" in lineup_df.columns:
             num_punts = (lineup_df["own_bucket"] == "Punt").sum()
             if num_punts > max_punts:
                 continue
 
-        # Basic correlation, sport-specific
+        # Correlation
         if sport == "NBA":
             corr_score = calculate_lineup_correlation_score(lineup_df, game_envs)
         elif sport == "NFL":
-            corr_score = calculate_nfl_correlation_score(lineup_df, game_envs)
+            corr_score = calculate_nfl_correlation_score(lineup_df, game_envs or {})
         else:
             corr_score = 0.0
 
-        # We'll store a lineup record
         record = {
             "total_proj": total_proj,
             "total_salary": lineup_df["Salary"].sum(),
@@ -359,27 +316,22 @@ def run_monte_carlo_lineups(
         return pd.DataFrame()
 
     df_lineups = pd.DataFrame(results)
-
-    # Sort by combination of projection + correlation + edge
     df_lineups["rank_score"] = (
         df_lineups["total_proj"]
         + 0.05 * df_lineups["edge_sum"]
         + 0.5 * df_lineups["correlation"]
     )
-
     df_lineups = df_lineups.sort_values("rank_score", ascending=False)
     df_lineups.reset_index(drop=True, inplace=True)
     return df_lineups.head(n_lineups)
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # STREAMLIT UI HELPERS
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 def sidebar_controls() -> Dict[str, Any]:
-    """
-    Renders sidebar controls and returns config.
-    """
+    """Renders sidebar controls and returns config."""
     st.sidebar.header("Lineup Builder Controls")
 
     contest_type = st.sidebar.selectbox(
@@ -490,9 +442,7 @@ def sidebar_controls() -> Dict[str, Any]:
 
 
 def show_player_pool(pool: pd.DataFrame, sport: str):
-    """
-    Display player pool with filters and summary.
-    """
+    """Display player pool with filters and summary."""
     st.subheader("Player Pool")
 
     if pool.empty:
@@ -501,23 +451,19 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
 
     pos_dtype = build_position_dtypes(sport)
     if pos_dtype.categories:
-        # For filtering / sorting by primary position
         pool["primary_pos"] = pool["positions"].apply(lambda x: str(x).split("/")[0])
         pool["primary_pos"] = pool["primary_pos"].astype(pos_dtype)
     else:
         pool["primary_pos"] = pool["positions"]
 
-    # Position filter
     unique_positions = sorted(pool["primary_pos"].dropna().unique(), key=str)
     selected_positions = st.multiselect(
         "Filter by primary position:",
         options=unique_positions,
         default=unique_positions,
     )
-
     filtered = pool[pool["primary_pos"].isin(selected_positions)]
 
-    # Team filter
     teams = sorted(filtered["Team"].dropna().unique())
     selected_teams = st.multiselect(
         "Filter by Team:",
@@ -526,10 +472,11 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
     )
     filtered = filtered[filtered["Team"].isin(selected_teams)]
 
-    # Ownership bucket filter if available
     if "own_bucket" in filtered.columns:
-        buckets = list(filtered["own_bucket"].cat.categories) if hasattr(filtered["own_bucket"], "cat") else sorted(
-            filtered["own_bucket"].dropna().unique()
+        buckets = (
+            list(filtered["own_bucket"].cat.categories)
+            if hasattr(filtered["own_bucket"], "cat")
+            else sorted(filtered["own_bucket"].dropna().unique())
         )
         selected_buckets = st.multiselect(
             "Filter by ownership bucket:",
@@ -538,14 +485,12 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
         )
         filtered = filtered[filtered["own_bucket"].isin(selected_buckets)]
 
-    # Show summary stats
     st.write("Summary:")
     col1, col2, col3 = st.columns(3)
     col1.metric("Player Count", len(filtered))
     col2.metric("Avg Projection", round(filtered["proj"].mean(), 2))
     col3.metric("Avg Salary", round(filtered["Salary"].mean(), 2))
 
-    # Sort table by projection
     filtered = filtered.sort_values("proj", ascending=False)
 
     st.dataframe(
@@ -567,10 +512,7 @@ def show_player_pool(pool: pd.DataFrame, sport: str):
 
 
 def choose_locks(pool: pd.DataFrame) -> List[str]:
-    """
-    Let the user lock players by name or player_id.
-    Returns a list of locked player IDs.
-    """
+    """Let the user lock players by name. Returns locked player_ids."""
     if pool.empty:
         return []
 
@@ -588,22 +530,16 @@ def choose_locks(pool: pd.DataFrame) -> List[str]:
 
 
 def show_game_environments(game_envs: Dict[str, Any], sport: str):
-    """
-    Display game environments or matchups.
-    """
+    """Display game environments / matchups."""
     st.subheader("Game Environments")
 
     if not game_envs:
-        st.info("No game environment data available (check that 'Team' and 'Opponent' columns exist).")
+        st.info("No game environment data available.")
         return
 
-    env_list = []
-    for key, env in game_envs.items():
-        env_list.append(env)
-
+    env_list = [env for _, env in game_envs.items()]
     df_env = pd.DataFrame(env_list)
 
-    # Attempt to reorder columns
     cols_order = [c for c in ["matchup", "Team", "Opponent", "pace", "total", "spread"] if c in df_env.columns]
     other_cols = [c for c in df_env.columns if c not in cols_order]
     df_env = df_env[cols_order + other_cols]
@@ -612,9 +548,7 @@ def show_game_environments(game_envs: Dict[str, Any], sport: str):
 
 
 def show_team_stacks(team_stacks: Dict[str, List[Dict[str, Any]]], sport: str):
-    """
-    Show possible team stacks for correlation.
-    """
+    """Show possible team stacks for correlation (NBA)."""
     st.subheader("Team Stacks (Heuristic)")
 
     if not team_stacks:
@@ -639,9 +573,7 @@ def show_team_stacks(team_stacks: Dict[str, List[Dict[str, Any]]], sport: str):
 
 
 def flatten_lineups_for_display(df_lineups: pd.DataFrame, roster_size: int) -> pd.DataFrame:
-    """
-    Flatten the lineup DataFrame into a more human-readable table.
-    """
+    """Flatten the lineup DataFrame into a more readable table."""
     if df_lineups.empty:
         return df_lineups
 
@@ -675,7 +607,9 @@ def flatten_lineups_for_display(df_lineups: pd.DataFrame, roster_size: int) -> p
         display_rows.append(
             {
                 "Lineup #": len(display_rows) + 1,
-                "Players": ", ".join([f"{p['Name']} ({p['Team']} - {p['positions']})" for p in lineup_players]),
+                "Players": ", ".join(
+                    [f"{p['Name']} ({p['Team']} - {p['positions']})" for p in lineup_players]
+                ),
                 "Total Salary": row["total_salary"],
                 "Total Projection": row["total_proj"],
                 "Edge Sum": row["edge_sum"],
@@ -683,22 +617,19 @@ def flatten_lineups_for_display(df_lineups: pd.DataFrame, roster_size: int) -> p
             }
         )
 
-    df_display = pd.DataFrame(display_rows)
-    return df_display
+    return pd.DataFrame(display_rows)
 
 
 def download_lineups_csv(df_lineups: pd.DataFrame) -> bytes:
-    """
-    Convert a lineup DataFrame to CSV bytes for download.
-    """
+    """Convert lineup DataFrame to CSV bytes for download."""
     csv_buf = io.StringIO()
     df_lineups.to_csv(csv_buf, index=False)
     return csv_buf.getvalue().encode("utf-8")
 
 
-# ======================================================================================
-# NFL-SPECIFIC LINEUP GENERATION
-# ======================================================================================
+# --------------------------------------------------------------------------------------
+# NFL-SPECIFIC WRAPPER
+# --------------------------------------------------------------------------------------
 
 def run_nfl_lineup_builder(
     pool: pd.DataFrame,
@@ -707,7 +638,7 @@ def run_nfl_lineup_builder(
 ) -> pd.DataFrame:
     """
     NFL-specific lineup builder using stacking + correlation rules
-    from nfl_stacks.py plus our basic Monte Carlo / constraints.
+    plus the generic Monte Carlo generator.
     """
     sport = "NFL"
     roster_size = config["roster_size"]
@@ -719,18 +650,17 @@ def run_nfl_lineup_builder(
     max_punts = config["max_punts"]
     allow_same_team = config["allow_same_team"]
 
-    # Build game environments
-    if "Opponent" in pool.columns:
+    # Use generic game environments for now
+    if "Team" in pool.columns and "Opponent" in pool.columns:
         game_envs = build_game_environments(pool)
     else:
         game_envs = {}
 
-    # Build NFL stacks
+    # Build NFL stacks (qb_stacks, rb_dst_stacks) – currently not hard-enforced
     nfl_stacks = build_nfl_stacks(pool)
-    qb_stacks = nfl_stacks.get("qb_stacks", {})
-    rb_dst_stacks = nfl_stacks.get("rb_dst_stacks", {})
+    # qb_stacks = nfl_stacks.get("qb_stacks", {})
+    # rb_dst_stacks = nfl_stacks.get("rb_dst_stacks", {})
 
-    # For now we pass game_envs to the generic MC builder; NFL correlation handled in calculate_nfl_correlation_score
     df_lineups = run_monte_carlo_lineups(
         pool=pool,
         sport=sport,
@@ -747,13 +677,12 @@ def run_nfl_lineup_builder(
         team_stacks=None,
     )
 
-    # Validate lineups using nfl_stacks logic (qb stacks / bringbacks, etc.)
     if df_lineups.empty:
         return df_lineups
 
+    # Validate lineups using nfl_stacks.validate_nfl_lineup (anti-correlations)
     valid_indices = []
     for idx, row in df_lineups.iterrows():
-        # Rebuild lineup players from row
         lineup_players = []
         for i in range(1, roster_size + 1):
             pid = row.get(f"player_id_{i}")
@@ -779,16 +708,16 @@ def run_nfl_lineup_builder(
 
         lineup_df = pd.DataFrame(lineup_players)
 
-        if validate_nfl_lineup(lineup_df, qb_stacks, rb_dst_stacks):
+        if validate_nfl_lineup(lineup_df):
             valid_indices.append(idx)
 
     df_lineups = df_lineups.loc[valid_indices].reset_index(drop=True)
     return df_lineups.head(n_lineups)
 
 
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 # MAIN APP
-# ======================================================================================
+# --------------------------------------------------------------------------------------
 
 def main():
     st.title("DFS Lineup Explorer (Enhanced Monte Carlo + Edge + Correlation)")
@@ -796,7 +725,7 @@ def main():
     st.write(
         """
         Upload a DraftKings-style CSV, tweak the controls, and generate **edge-aware** lineups
-        that consider **projection, ownership, and correlation**. 
+        that consider **projection, ownership, and correlation**.
         """
     )
 
@@ -815,11 +744,9 @@ def main():
     df = clean_positions(df)
     df = add_ownership_bucket_column(df)
 
-    # Detect sport
     sport = detect_sport(df)
     st.write(f"**Detected sport:** `{sport}`")
 
-    # Build game environments and team stacks for correlation
     if "Team" in df.columns and "Opponent" in df.columns:
         game_envs = build_game_environments(df)
     else:
@@ -828,4 +755,68 @@ def main():
     if sport == "NBA":
         team_stacks = build_team_stacks(df)
     else:
-        team
+        team_stacks = {}
+
+    show_player_pool(df, sport)
+
+    if game_envs:
+        show_game_environments(game_envs, sport)
+
+    if sport == "NBA" and team_stacks:
+        show_team_stacks(team_stacks, sport)
+
+    locked_ids = choose_locks(df)
+
+    st.subheader("Generate Lineups")
+
+    if st.button("Run Builder"):
+        with st.spinner("Building lineups... (Monte Carlo + edge + correlation)"):
+            if sport == "NFL":
+                df_lineups = run_nfl_lineup_builder(
+                    pool=df,
+                    config=config,
+                    locked_ids=locked_ids,
+                )
+            else:
+                df_lineups = run_monte_carlo_lineups(
+                    pool=df,
+                    sport=sport,
+                    n_lineups=config["n_lineups"],
+                    roster_size=config["roster_size"],
+                    salary_cap=config["salary_cap"],
+                    min_salary=config["min_salary"],
+                    locked_ids=locked_ids,
+                    min_projection=config["min_projection"],
+                    min_floor=config["min_floor"],
+                    max_punts=config["max_punts"],
+                    allow_same_team=config["allow_same_team"],
+                    game_envs=game_envs,
+                    team_stacks=team_stacks,
+                )
+
+        if df_lineups.empty:
+            st.error(
+                "❌ Could not generate any valid lineups. "
+                "Try loosening constraints or expanding your player pool."
+            )
+        else:
+            st.success(f"✅ Generated {len(df_lineups)} lineups.")
+
+            df_display = flatten_lineups_for_display(df_lineups, config["roster_size"])
+            st.dataframe(df_display, use_container_width=True)
+
+            with st.expander("Show raw lineup data"):
+                st.dataframe(df_lineups, use_container_width=True)
+
+            csv_bytes = download_lineups_csv(df_lineups)
+            st.download_button(
+                "Download Lineups CSV",
+                data=csv_bytes,
+                file_name="lineups_enhanced.csv",
+                mime="text/csv",
+            )
+
+
+# Call main unconditionally so Streamlit always runs it
+main()
+
