@@ -78,10 +78,14 @@ def assign_edge_category(row):
 
 
 def calculate_gpp_score(row):
+    """
+    Composite GPP score: value + leverage + ceiling.
+    We keep this, but the builder uses it *with* projection, not instead of it.
+    """
     ceiling_component = (row["ceiling"] / 100) * 0.4
-    value_component = (row["value"] / 7) * 0.3
-    leverage_normalized = (row["leverage_score"] + 20) / 40
-    leverage_component = max(0, leverage_normalized) * 0.3
+    value_component = (row["value"] / 7) * 0.4  # slightly more value weight
+    leverage_normalized = (row["leverage_score"] + 20) / 40  # -20..+20 -> 0..1
+    leverage_component = max(0, leverage_normalized) * 0.2
     gpp_score = (ceiling_component + value_component + leverage_component) * 100
     return round(gpp_score, 1)
 
@@ -459,20 +463,20 @@ def get_default_n_lineups(contest_label: str) -> int:
 
 def get_edge_weights(contest_style: str) -> Dict[str, float]:
     """
-    Weights for projection / gpp_score / leverage / ownership by contest type.
-    Higher own penalty + leverage weight = more contrarian.
+    Weights for projection / gpp_score / ownership by contest type.
+    No direct leverage_score term here – leverage is already baked into gpp_score.
     """
     if contest_style == "cash":
-        return {"proj": 1.0, "gpp": 0.1, "lev": 0.0, "own": 0.0}
+        return {"proj": 1.0, "gpp": 0.2, "own": 0.0}
     if contest_style == "single_entry":
-        return {"proj": 0.8, "gpp": 0.6, "lev": 0.3, "own": 0.05}
+        return {"proj": 0.9, "gpp": 0.5, "own": 0.05}
     if contest_style == "three_max":
-        return {"proj": 0.7, "gpp": 0.8, "lev": 0.4, "own": 0.10}
+        return {"proj": 0.8, "gpp": 0.7, "own": 0.08}
     if contest_style == "twenty_max":
-        return {"proj": 0.6, "gpp": 1.0, "lev": 0.6, "own": 0.15}
+        return {"proj": 0.7, "gpp": 0.9, "own": 0.12}
     if contest_style == "milly":
-        return {"proj": 0.5, "gpp": 1.2, "lev": 0.8, "own": 0.25}
-    return {"proj": 0.8, "gpp": 0.6, "lev": 0.3, "own": 0.05}
+        return {"proj": 0.6, "gpp": 1.0, "own": 0.18}
+    return {"proj": 0.9, "gpp": 0.5, "own": 0.05}
 
 
 def build_simple_lineups(
@@ -487,10 +491,9 @@ def build_simple_lineups(
 ) -> List[Dict[str, Any]]:
     """
     Edge-based random search:
-    - Uses proj + gpp_score + leverage - ownership penalty
+    - Uses projection + GPP composite - ownership penalty
     - Weights depend on contest_style (cash vs SE vs 20-max vs milly)
-    - Samples lineups randomly, biased toward high edge_score_base
-    - Much more likely to find a valid lineup if one exists
+    - Projection floor removes truly dead punts from the non-locked pool
     """
 
     # Filter out excluded upfront
@@ -507,26 +510,38 @@ def build_simple_lineups(
         return []  # impossible
 
     # Fill NaNs just in case
-    for col in ["proj", "gpp_score", "leverage_score", "own_proj"]:
+    for col in ["proj", "gpp_score", "own_proj"]:
         if col in pool.columns:
             pool[col] = pool[col].fillna(0)
 
     weights = get_edge_weights(contest_style)
 
-    pool["edge_score_base"] = (
-        weights["proj"] * pool["proj"]
-        + weights["gpp"] * (pool["gpp_score"] / 3.0)
-        + weights["lev"] * pool["leverage_score"]
-        - weights["own"] * pool["own_proj"]
-    )
-
     # Base pool for non-locked players
     base_pool = pool[~pool["player_id"].isin(locked_ids)].copy()
+
+    # Projection floor to avoid garbage punts
+    if not base_pool.empty:
+        if contest_style in ["cash", "single_entry"]:
+            q = 0.2
+        else:
+            q = 0.1
+        proj_cutoff = base_pool["proj"].quantile(q)
+        base_pool = base_pool[base_pool["proj"] >= proj_cutoff]
 
     if len(base_pool) + len(locks_df) < roster_size:
         return []  # not enough total players to fill lineup
 
-    # Probabilities for weighted sampling
+    # Edge score: projection + GPP – ownership penalty
+    # gpp_score scaled down to keep on similar magnitude as proj
+    pool["edge_score_base"] = (
+        weights["proj"] * pool["proj"]
+        + weights["gpp"] * (pool["gpp_score"] / 10.0)
+        - weights["own"] * pool["own_proj"]
+    )
+
+    # Need base_pool with edge_score_base as well
+    base_pool = pool[~pool["player_id"].isin(locked_ids)].copy()
+
     scores = base_pool["edge_score_base"].to_numpy()
     # shift so all >= 0
     min_score = np.min(scores)
@@ -640,7 +655,7 @@ n_lineups = st.sidebar.slider(
 
 contest_style = get_builder_style(contest_type_label, int(field_size))
 st.sidebar.caption(
-    f"Build style: **{contest_style}** (proj + upside + leverage – ownership)"
+    f"Build style: **{contest_style}** (Projection + GPP score – ownership penalty)"
 )
 
 st.sidebar.markdown("---")
@@ -666,7 +681,7 @@ if load_btn:
 
 
 # Main – builder + results
-st.title("NBA DFS Lineup Builder (Edge-Aware)")
+st.title("NBA DFS Lineup Builder (Data-Driven Edge)")
 
 slate_df = st.session_state["slate_df"]
 
@@ -792,7 +807,7 @@ else:
                             f"Unlock a high-salary player or two."
                         )
                     else:
-                        with st.spinner("Building lineups with upside + leverage logic..."):
+                        with st.spinner("Building lineups with projection + edge logic..."):
                             lineups = build_simple_lineups(
                                 df=edited_df,
                                 contest_style=contest_style,
@@ -810,7 +825,7 @@ else:
                                 f"- Roster size = {roster_size}\n"
                                 f"- Salary cap = ${salary_cap:,}\n"
                                 "- Your current locks / excludes\n\n"
-                                "Given the pre-checks, this usually means the locks + high salaries\n"
+                                "Given the pre-checks, this usually means the locks + salaries\n"
                                 "are forcing impossible combinations.\n\n"
                                 "Try:\n"
                                 "• Reducing the number of locked players\n"
