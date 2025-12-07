@@ -7,13 +7,6 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
-# Import from builder
-from builder import (
-    ownership_bucket,
-    build_game_environments,
-    build_team_stacks,
-    calculate_lineup_correlation_score,
-)
 
 # -------------------------------------------------------------------
 # BASIC CONFIG / MULTI-SPORT RULES
