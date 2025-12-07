@@ -46,7 +46,7 @@ OWNERSHIP_COLS = ["Ownership", "Own", "Exposure", "Proj Own", "Own%"]
 
 
 def normalize_column(df: pd.DataFrame, possible_names: List[str], new_name: str) -> pd.DataFrame:
-    """Rename any matching columns from possible_names to new_name if found."""
+    """(Unused now; kept for future) Rename any matching columns from possible_names to new_name if found."""
     for col in possible_names:
         if col in df.columns:
             df = df.rename(columns={col: new_name})
@@ -55,27 +55,54 @@ def normalize_column(df: pd.DataFrame, possible_names: List[str], new_name: str)
 
 
 def load_and_normalize_csv(file: io.BytesIO) -> pd.DataFrame:
-    """Load CSV, normalize columns and perform basic cleanup."""
+    """
+    Load CSV, normalize columns and perform basic cleanup.
+
+    Designed to work with DraftKings-style files like:
+    Player, Salary, Position, Team, Opponent, Projection, Value, Ownership
+    and with minor header variations.
+    """
     df = pd.read_csv(file)
 
-    # Normalize columns
-    df = normalize_column(df, PLAYER_ID_COLS, "player_id")
-    df = normalize_column(df, NAME_COLS, "Name")
-    df = normalize_column(df, TEAM_COLS, "Team")
-    df = normalize_column(df, OPPONENT_COLS, "Opponent")
-    df = normalize_column(df, POSITION_COLS, "positions")
-    df = normalize_column(df, SALARY_COLS, "Salary")
-    df = normalize_column(df, PROJECTION_COLS, "proj")
-    df = normalize_column(df, OWNERSHIP_COLS, "own_proj")
+    # Make header handling robust
+    df.columns = df.columns.str.strip().str.lower()
 
-    # Required *from your CSV* (player_id will be generated if missing)
+    # Map many possible DK headers into our internal names
+    rename_map = {
+        "player": "Name",
+        "name": "Name",
+        "salary": "Salary",
+        "position": "positions",
+        "pos": "positions",
+        "positions": "positions",
+        "team": "Team",
+        "tm": "Team",
+        "opponent": "Opponent",
+        "opp": "Opponent",
+        "opp_team": "Opponent",
+        "projection": "proj",
+        "proj": "proj",
+        "fpts": "proj",
+        "fpts.": "proj",
+        "points": "proj",
+        "value": "Value",
+        "ownership": "own_proj",
+        "ownership%": "own_proj",
+        "own": "own_proj",
+        "own%": "own_proj",
+        "exposure": "own_proj",
+        "proj own": "own_proj",
+    }
+    df = df.rename(columns=rename_map)
+
+    # Required logical columns (player_id will be created)
     required = ["Name", "Team", "positions", "Salary", "proj"]
-    missing = [col for col in required if col not in df.columns]
+    missing = [c for c in required if c not in df.columns]
     if missing:
-        st.error(f"CSV is missing required columns: {missing}")
+        st.error(f"CSV is missing required columns after normalization: {missing}")
         return pd.DataFrame()
 
-    # If no player_id, auto-generate one from existing info
+    # Auto-create player_id if missing
     if "player_id" not in df.columns:
         df["player_id"] = (
             df["Name"].astype(str)
@@ -83,14 +110,19 @@ def load_and_normalize_csv(file: io.BytesIO) -> pd.DataFrame:
             + "_" + df["Salary"].astype(str)
         )
 
+    # Ownership column may not exist; create if needed
     if "own_proj" not in df.columns:
         df["own_proj"] = np.nan
 
+    # Ensure numeric
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
     df["proj"] = pd.to_numeric(df["proj"], errors="coerce")
     df["own_proj"] = pd.to_numeric(df["own_proj"], errors="coerce")
 
+    # Drop rows that don't have basic numeric info
     df = df.dropna(subset=["Salary", "proj"])
+
+    # Ensure positions is string
     df["positions"] = df["positions"].astype(str)
 
     return df
