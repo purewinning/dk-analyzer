@@ -941,13 +941,18 @@ def tab_lineup_builder(slate_df, template):
         "own_proj": st.column_config.NumberColumn("Own%", format="%.1f%%", width="small"),
         "Lock": st.column_config.CheckboxColumn("🔒", help="Lock into lineup", width="small"), 
         "Exclude": st.column_config.CheckboxColumn("❌", help="Exclude from lineups", width="small"), 
-        "Team": None, "Opponent": None, "bucket": None, "Minutes": None, "FPPM": None,
-        "player_id": None, "GameID": None
+        "Team": None, 
+        "Opponent": None, 
+        "bucket": None, 
+        "Minutes": None, 
+        "FPPM": None,
+        "player_id": None,  # Hidden but included in data
+        "GameID": None
     }
     
     column_order = [
         'Lock', 'Exclude', 'Name', 'edge_category', 'gpp_score', 'leverage_score',
-        'positions', 'salary', 'proj', 'ceiling', 'value', 'own_proj'
+        'positions', 'salary', 'proj', 'ceiling', 'value', 'own_proj', 'player_id'
     ]
     
     df_for_editor = slate_df.copy()
@@ -969,9 +974,25 @@ def tab_lineup_builder(slate_df, template):
         st.info("Lineup results will appear here.")
         return 
 
-    df_for_editor = df_for_editor[column_order + ['player_id', 'GameID']]
+    # Ensure all necessary columns exist in df_for_editor
+    for col in column_order:
+        if col not in df_for_editor.columns:
+            if col == 'Lock' or col == 'Exclude':
+                df_for_editor[col] = False
+            else:
+                df_for_editor[col] = None
     
-    edited_df = st.data_editor(df_for_editor, column_config=column_config, column_order=column_order, hide_index=True, use_container_width=True, height=400, key="player_editor_final")
+    df_for_editor = df_for_editor[column_order]
+    
+    edited_df = st.data_editor(
+        df_for_editor, 
+        column_config=column_config, 
+        column_order=column_order, 
+        hide_index=True, 
+        use_container_width=True, 
+        height=400, 
+        key="player_editor_final"
+    )
     st.session_state['edited_df'] = edited_df
     
     edited_df['player_id'] = edited_df['player_id'].astype(str)
@@ -1182,7 +1203,28 @@ def tab_lineup_builder(slate_df, template):
     run_btn = st.button(f"🚀 Build {n_lineups} Lineups Using {selected_template['name']}", use_container_width=True, type="primary")
     
     if run_btn:
+        # Start with the edited dataframe but merge back all necessary columns from slate_df
         final_df = st.session_state['edited_df'].copy()
+        
+        # Ensure we have all necessary columns by merging with original slate_df
+        # The edited_df has Lock/Exclude changes, but we need all the other columns too
+        cols_to_merge = ['player_id', 'bucket', 'GameID', 'Team', 'Opponent', 'edge_category', 
+                         'leverage_score', 'ceiling', 'gpp_score', 'value']
+        
+        # Keep only columns that exist in slate_df
+        cols_to_merge = [col for col in cols_to_merge if col in slate_df.columns]
+        
+        # Drop these columns from final_df if they exist (to avoid duplicates in merge)
+        cols_to_drop = [col for col in cols_to_merge if col in final_df.columns and col != 'player_id']
+        if cols_to_drop:
+            final_df = final_df.drop(columns=cols_to_drop)
+        
+        # Merge to get all necessary columns back
+        final_df = final_df.merge(
+            slate_df[cols_to_merge],
+            on='player_id',
+            how='left'
+        )
         
         # Apply GPP score filter
         if min_gpp_score > 0:
