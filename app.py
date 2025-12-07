@@ -138,9 +138,12 @@ def normalize_csv_data(df: pd.DataFrame) -> pd.DataFrame:
         "points": "proj",
         "ownership": "own",
         "ownership%": "own",
+        "ownership %": "own",
         "own": "own",
         "own%": "own",
         "own_proj": "own",
+        "proj own": "own",
+        "proj_own": "own",
     }
     
     df = df.rename(columns=column_map)
@@ -162,16 +165,31 @@ def normalize_csv_data(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["salary"] = pd.to_numeric(df["salary"], errors="coerce")
     
-    # Clean ownership
+    # Clean ownership - CRITICAL FIX
     if "own" in df.columns:
-        df["own"] = (
-            df["own"].astype(str)
-            .str.replace("%", "", regex=False)
-            .str.strip()
-        )
+        df["own"] = df["own"].astype(str).str.strip()
+        # Remove % sign
+        df["own"] = df["own"].str.replace("%", "", regex=False)
+        # Remove any other non-numeric characters except decimal
+        df["own"] = df["own"].str.replace(r"[^\d.]", "", regex=True)
+        # Convert to numeric
         df["own"] = pd.to_numeric(df["own"], errors="coerce")
+        
+        # Check if values are in decimal format (0.15 instead of 15)
+        max_own = df["own"].max()
+        if pd.notna(max_own) and max_own > 0 and max_own <= 1.0:
+            # Convert decimal to percentage
+            df["own"] = df["own"] * 100
+        
+        # Fill any NaN with median ownership
+        median_own = df["own"].median()
+        if pd.isna(median_own) or median_own == 0:
+            median_own = 15.0
+        df["own"] = df["own"].fillna(median_own)
     else:
-        df["own"] = 15.0  # Default
+        # No ownership column - use intelligent defaults
+        df["own"] = 15.0
+        st.warning("⚠️ No ownership column found. Using default 15% for all players.")
     
     # Clean numeric columns
     df["proj"] = pd.to_numeric(df["proj"], errors="coerce")
@@ -205,7 +223,7 @@ def normalize_csv_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def calculate_metrics(df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
-    """Calculate advanced metrics."""
+    """Calculate advanced metrics with better edge categorization."""
     df = df.copy()
     
     # Value (points per $1K)
@@ -221,7 +239,6 @@ def calculate_metrics(df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
     
     # Ceiling (sport-specific multipliers)
     if sport == Sport.NFL:
-        # QB/RB have higher variance
         df["ceiling_mult"] = df["positions"].apply(
             lambda x: 1.6 if "QB" in str(x) else 1.5 if "RB" in str(x) else 1.4
         )
@@ -229,32 +246,92 @@ def calculate_metrics(df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
         df["ceiling_mult"] = 1.4
     
     df["ceiling"] = (df["proj"] * df["ceiling_mult"]).round(1)
-    
-    # Floor (70% of projection)
     df["floor"] = (df["proj"] * 0.7).round(1)
     
-    # Ownership tier
-    def own_tier(own):
-        if pd.isna(own):
-            return "mid"
-        if own >= 40:
-            return "mega-chalk"
+    # BETTER EDGE CATEGORIZATION
+    # Based on ownership + leverage to find true edges
+    def categorize_edge(row):
+        own = row["own"]
+        lev = row["leverage"]
+        val = row["value"]
+        
+        # Mega Chalk - High ownership, poor leverage (avoid!)
+        if own >= 40 and lev < 5:
+            return "🔴 Mega Chalk Trap"
+        
+        # Chalk with Edge - High ownership but still has value
+        if own >= 35 and lev >= 10:
+            return "🟡 Chalk w/ Edge"
+        
+        # Regular Chalk - High ownership, moderate leverage
         if own >= 30:
-            return "chalk"
-        if own >= 15:
-            return "mid"
-        if own >= 8:
-            return "contrarian"
-        return "super-contrarian"
+            if lev >= 5:
+                return "🟠 Chalk (Playable)"
+            else:
+                return "🟠 Chalk (Fading)"
+        
+        # Elite Leverage - Mid ownership with massive leverage
+        if 15 <= own < 30 and lev >= 15:
+            return "💎 Elite Leverage"
+        
+        # High Leverage - Mid ownership with strong leverage
+        if 15 <= own < 30 and lev >= 10:
+            return "🟢 High Leverage"
+        
+        # Solid Value - Mid ownership, good value
+        if 15 <= own < 30 and val >= 4.5:
+            return "✅ Solid Value"
+        
+        # Contrarian Edge - Low ownership with high leverage
+        if own < 15 and lev >= 12:
+            return "💰 Contrarian Edge"
+        
+        # Contrarian Value - Low ownership with good value
+        if own < 15 and val >= 4.3:
+            return "💸 Contrarian Value"
+        
+        # Super Contrarian - Very low ownership
+        if own < 8:
+            if lev >= 8:
+                return "⭐ Super Contrarian"
+            else:
+                return "🎲 Punt Play"
+        
+        # Mid - Nothing special
+        if 15 <= own < 30:
+            return "➖ Mid"
+        
+        # Chalk Risk - Higher ownership, no edge
+        if own >= 30 and lev < 0:
+            return "⚠️ Chalk Risk"
+        
+        # Default
+        return "➖ Neutral"
     
-    df["own_tier"] = df["own"].apply(own_tier)
+    df["edge_category"] = df.apply(categorize_edge, axis=1)
+    
+    # Simple tier for filtering
+    def simple_tier(category):
+        if "Super Contrarian" in category or "Contrarian Edge" in category or "Elite Leverage" in category:
+            return "elite-edge"
+        if "Contrarian Value" in category or "High Leverage" in category or "Chalk w/ Edge" in category:
+            return "strong-edge"
+        if "Solid Value" in category or "Playable" in category:
+            return "playable"
+        if "Mid" in category or "Neutral" in category:
+            return "neutral"
+        if "Punt" in category:
+            return "punt"
+        return "avoid"
+    
+    df["edge_tier"] = df["edge_category"].apply(simple_tier)
     
     # GPP score (weighted composite for tournament play)
     df["gpp_score"] = (
-        df["ceiling"] * 0.4 +        # Ceiling matters most
-        df["value"] * 10 * 0.3 +      # Value is important
-        df["leverage"] * 0.2 +        # Leverage bonus
-        (100 - df["own"]) * 0.1       # Ownership fade
+        df["ceiling"] * 0.4 +
+        df["value"] * 10 * 0.3 +
+        df["leverage"] * 0.2 +
+        (100 - df["own"]) * 0.1
     ).round(1)
     
     return df
@@ -853,10 +930,11 @@ def main():
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        own_filters = st.multiselect(
-            "Ownership Tier",
-            ["super-contrarian", "contrarian", "mid", "chalk", "mega-chalk"],
-            default=["super-contrarian", "contrarian", "mid"]
+        edge_filters = st.multiselect(
+            "Edge Tier (Focus Here!)",
+            ["elite-edge", "strong-edge", "playable", "neutral", "punt", "avoid"],
+            default=["elite-edge", "strong-edge", "playable"],
+            help="elite-edge = Contrarian leverage, avoid = Chalk traps"
         )
     
     with col2:
@@ -881,10 +959,12 @@ def main():
     
     # Filter pool
     filtered = pool[
-        (pool["own_tier"].isin(own_filters)) &
+        (pool["edge_tier"].isin(edge_filters)) &
         (pool["team"].isin(selected_teams) if selected_teams else True) &
         (pool["value"] >= min_value)
     ].copy()
+    
+    st.caption(f"📊 Showing {len(filtered)} players • Edge breakdown below player pool")
     
     # Add lock/exclude columns
     if "lock" not in filtered.columns:
@@ -895,7 +975,7 @@ def main():
     # Display
     display_cols = [
         "lock", "exclude", "name", "positions", "team", "opp",
-        "salary", "proj", "value", "own", "leverage", "ceiling", "own_tier", "gpp_score"
+        "salary", "proj", "value", "own", "leverage", "edge_category", "ceiling", "gpp_score"
     ]
     
     edited = st.data_editor(
@@ -910,8 +990,8 @@ def main():
             "value": st.column_config.NumberColumn("Value", format="%.2f"),
             "own": st.column_config.NumberColumn("Own%", format="%.1f%%"),
             "leverage": st.column_config.NumberColumn("Lev", format="%+.1f"),
+            "edge_category": st.column_config.TextColumn("Edge Tag", width="medium"),
             "ceiling": st.column_config.NumberColumn("Ceil", format="%.1f"),
-            "own_tier": st.column_config.TextColumn("Tier", width="small"),
             "gpp_score": st.column_config.NumberColumn("GPP Score", format="%.1f"),
         },
         hide_index=True,
@@ -932,6 +1012,30 @@ def main():
     
     if locks or excludes:
         st.caption(f"🔒 Locked: {len(locks)}  •  ❌ Excluded: {len(excludes)}")
+    
+    # Edge breakdown
+    st.markdown("---")
+    st.subheader("🎯 Edge Breakdown")
+    
+    edge_counts = filtered["edge_category"].value_counts()
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**PLAY THESE:**")
+        for category in ["💎 Elite Leverage", "💰 Contrarian Edge", "⭐ Super Contrarian", 
+                         "🟢 High Leverage", "💸 Contrarian Value", "🟡 Chalk w/ Edge"]:
+            count = edge_counts.get(category, 0)
+            if count > 0:
+                st.text(f"{category}: {count} players")
+    
+    with col2:
+        st.markdown("**CONSIDER/AVOID:**")
+        for category in ["✅ Solid Value", "🟠 Chalk (Playable)", "➖ Mid",
+                         "🔴 Mega Chalk Trap", "🟠 Chalk (Fading)", "⚠️ Chalk Risk"]:
+            count = edge_counts.get(category, 0)
+            if count > 0:
+                st.text(f"{category}: {count} players")
     
     st.markdown("---")
     
@@ -1043,7 +1147,7 @@ def main():
         st.dataframe(
             lineup_df[[
                 "slot", "name", "positions", "team", "opp",
-                "salary", "proj", "own", "leverage", "ceiling", "own_tier"
+                "salary", "proj", "own", "leverage", "edge_category", "ceiling"
             ]].style.format({
                 "salary": "${:,}",
                 "proj": "{:.1f}",
