@@ -1440,11 +1440,20 @@ if __name__ == '__main__':
         if ownership_strategy == "Full Chalk":
             contest_code = "CASH"
         elif ownership_strategy == "Contrarian":
-            contest_code = "20MAX"
+            contest_code = "LARGE_GPP"
         elif ownership_strategy == "Max Leverage":
             contest_code = "LARGE_GPP"
         else:
-            contest_code = tournament_config['code']
+            # Map our new codes to builder.py compatible codes
+            code_mapping = {
+                "CASH": "CASH",
+                "SE": "SE",
+                "3MAX": "SE",  # Use SE template
+                "20MAX": "LARGE_GPP",  # Use LARGE_GPP template
+                "LARGE_GPP": "LARGE_GPP",
+                "SHOWDOWN": "SE"  # Use SE template
+            }
+            contest_code = code_mapping.get(tournament_config['code'], "SE")
         
         st.divider()
         st.subheader("📊 Load Player Data")
