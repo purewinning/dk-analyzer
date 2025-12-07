@@ -605,79 +605,26 @@ def display_multiple_lineups(slate_df, template, lineup_list):
 
     st.markdown("---")
     
-    # TEMPLATE SELECTION
-    st.header("2. Select Winning Template")
-    
-    template_choice = st.selectbox(
-        "Choose Lineup Construction Template",
-        options=list(WINNING_TEMPLATES.keys()),
-        format_func=lambda x: WINNING_TEMPLATES[x]['name'],
-        help="These are historically proven templates based on real winning lineups"
-    )
-    
-    selected_template = WINNING_TEMPLATES[template_choice]
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.info(f"**{selected_template['name']}**\n\n{selected_template['description']}")
-    
-    with col2:
-        st.metric("Target Distribution", 
-                 f"{selected_template['requirements']['min_leverage_plays']} leverage plays")
-        st.metric("Max Chalk", selected_template['requirements']['max_chalk'])
-    
-    # Show template requirements
-    with st.expander("📋 Template Requirements & Distribution"):
-        st.markdown("**Requirements:**")
-        reqs = selected_template['requirements']
-        st.write(f"- ✅ Min {reqs['min_value_plays']} players with 5.0+ value")
-        st.write(f"- ✅ Min {reqs['min_leverage_plays']} players with 10+ leverage")
-        st.write(f"- ⚠️ Max {reqs['max_chalk']} players over 30% owned")
-        st.write(f"- 🎯 Require {reqs['required_punt']} player(s) under 5% owned")
-        
-        st.markdown("**Target Edge Distribution:**")
-        dist = selected_template['target_distribution']
-        dist_df = pd.DataFrame({
-            'Edge Type': list(dist.keys()),
-            'Target Count': list(dist.values())
-        })
-        st.table(dist_df)
-    
-    st.markdown("---")
-    
-    # SHOW TOP EDGES
-    st.subheader("🔥 Top Edges by Template")
+    # Show best edges section
+    st.subheader("🔥 Top Edges in Your Lineups")
     
     if not slate_df.empty:
+        # Get all players used across top 3 lineups
+        all_used_players = set()
+        for lineup in lineup_list[:3]:
+            all_used_players.update(lineup['player_ids'])
+        
+        used_players_df = slate_df[slate_df['player_id'].isin(all_used_players)]
+        
         # Show elite leverage plays
-        elite_plays = slate_df[slate_df['edge_category'] == '🔥 Elite Leverage'].nlargest(5, 'gpp_score')[
+        elite_plays = used_players_df[used_players_df['edge_category'] == '🔥 Elite Leverage'].nlargest(5, 'gpp_score')[
             ['Name', 'positions', 'salary', 'proj', 'own_proj', 'leverage_score', 'gpp_score']
         ]
         
         if len(elite_plays) > 0:
-            st.markdown("**🔥 Elite Leverage Plays:**")
+            st.markdown("**🔥 Elite Leverage Plays in Your Lineups:**")
             st.dataframe(
                 elite_plays.style.format({
-                    'salary': '${:,}',
-                    'proj': '{:.1f}',
-                    'own_proj': '{:.1f}%',
-                    'leverage_score': '{:+.1f}',
-                    'gpp_score': '{:.1f}'
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
-        
-        # Show chalk traps
-        chalk_traps = slate_df[slate_df['edge_category'].isin(['❌ Chalk Trap', '⚠️ Slight Chalk'])].nsmallest(5, 'leverage_score')[
-            ['Name', 'positions', 'salary', 'proj', 'own_proj', 'leverage_score', 'gpp_score']
-        ]
-        
-        if len(chalk_traps) > 0:
-            st.markdown("**❌ Chalk Traps to Fade:**")
-            st.dataframe(
-                chalk_traps.style.format({
                     'salary': '${:,}',
                     'proj': '{:.1f}',
                     'own_proj': '{:.1f}%',
@@ -1012,10 +959,13 @@ def tab_lineup_builder(slate_df, template):
         edited_df = st.data_editor(blank_df, column_config=column_config, column_order=column_order, hide_index=True, use_container_width=True, height=200, key="player_editor_blank")
         st.session_state['edited_df'] = blank_df
         st.markdown("---")
-        st.header("2. Find Optimal Lineups")
+        st.header("2. Select Winning Template")
+        st.info("Template selection will be enabled once data is loaded.")
+        st.markdown("---")
+        st.header("3. Generate Lineups")
         st.info("Optimization controls will be enabled once data is loaded.")
         st.markdown("---")
-        st.header("3. Top 10 Lineups")
+        st.header("4. Your Lineups")
         st.info("Lineup results will appear here.")
         return 
 
@@ -1141,6 +1091,47 @@ def tab_lineup_builder(slate_df, template):
                     height=300
                 )
 
+    st.markdown("---")
+    
+    # TEMPLATE SELECTION - MOVED HERE (before it's used)
+    st.header("2. Select Winning Template")
+    
+    template_choice = st.selectbox(
+        "Choose Lineup Construction Template",
+        options=list(WINNING_TEMPLATES.keys()),
+        format_func=lambda x: WINNING_TEMPLATES[x]['name'],
+        help="These are historically proven templates based on real winning lineups"
+    )
+    
+    selected_template = WINNING_TEMPLATES[template_choice]
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.info(f"**{selected_template['name']}**\n\n{selected_template['description']}")
+    
+    with col2:
+        st.metric("Target Distribution", 
+                 f"{selected_template['requirements']['min_leverage_plays']} leverage plays")
+        st.metric("Max Chalk", selected_template['requirements']['max_chalk'])
+    
+    # Show template requirements
+    with st.expander("📋 Template Requirements & Distribution"):
+        st.markdown("**Requirements:**")
+        reqs = selected_template['requirements']
+        st.write(f"- ✅ Min {reqs['min_value_plays']} players with 5.0+ value")
+        st.write(f"- ✅ Min {reqs['min_leverage_plays']} players with 10+ leverage")
+        st.write(f"- ⚠️ Max {reqs['max_chalk']} players over 30% owned")
+        st.write(f"- 🎯 Require {reqs['required_punt']} player(s) under 5% owned")
+        
+        st.markdown("**Target Edge Distribution:**")
+        dist = selected_template['target_distribution']
+        dist_df = pd.DataFrame({
+            'Edge Type': list(dist.keys()),
+            'Target Count': list(dist.values())
+        })
+        st.table(dist_df)
+    
     st.markdown("---")
     
     st.header("3. Generate Lineups with Template")
@@ -1305,7 +1296,7 @@ def tab_lineup_builder(slate_df, template):
     if st.session_state['optimal_lineups_results'].get('ran', False):
         display_multiple_lineups(slate_df, template, st.session_state['optimal_lineups_results']['lineups'])
     else:
-        st.info("Select the number of lineups and click 'Generate Top N Lineups' above to run the multi-lineup builder.")
+        st.info("Select the number of lineups and click the button above to run the multi-lineup builder.")
 
 
 def tab_strategy_lab(slate_df, template):
@@ -1321,6 +1312,8 @@ def tab_results_analysis(slate_df, template):
 def tab_contest_analyzer(slate_df, template):
     st.header("📊 Contest Strategy Analyzer")
     st.info("Contest Analyzer - Coming soon!")
+
+
 if __name__ == '__main__':
     
     # Sidebar
