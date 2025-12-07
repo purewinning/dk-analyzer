@@ -16,12 +16,28 @@ from builder import (
 )
 
 # -------------------------------------------------------------------
-# BASIC CONFIG / NBA RULES
+# BASIC CONFIG / MULTI-SPORT RULES
 # -------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="NBA DFS Lineup Builder (Enhanced)")
+st.set_page_config(layout="wide", page_title="DFS Lineup Builder (NBA/NFL)")
 
-DEFAULT_SALARY_CAP = 50000   # DraftKings NBA classic default
-DEFAULT_ROSTER_SIZE = 8      # PG, SG, SF, PF, C, G, F, UTIL
+# Sport-specific defaults
+SPORT_CONFIGS = {
+    "NBA": {
+        "salary_cap": 50000,
+        "roster_size": 8,
+        "positions": ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"],
+        "title": "NBA DFS Lineup Builder"
+    },
+    "NFL": {
+        "salary_cap": 50000,
+        "roster_size": 9,
+        "positions": ["QB", "RB", "RB", "WR", "WR", "WR", "TE", "FLEX", "DST"],
+        "title": "NFL DFS Lineup Builder"
+    }
+}
+
+DEFAULT_SALARY_CAP = 50000
+DEFAULT_ROSTER_SIZE = 8  # Will be overridden by sport detection
 
 # -------------------------------------------------------------------
 # CSV MAPPING / EDGE CALCS
@@ -52,6 +68,32 @@ CORE_INTERNAL_COLS = [
     "Team",
     "Opponent",
 ]
+
+
+def detect_sport(df: pd.DataFrame) -> str:
+    """
+    Detect sport type from position data.
+    Returns: "NBA", "NFL", or "UNKNOWN"
+    """
+    if df.empty or "positions" not in df.columns:
+        return "NBA"  # Default
+    
+    positions_str = " ".join(df["positions"].astype(str).str.upper())
+    
+    # NFL positions
+    nfl_positions = ["QB", "RB", "WR", "TE", "DST", "FLEX", "DEF"]
+    nfl_count = sum(1 for pos in nfl_positions if pos in positions_str)
+    
+    # NBA positions  
+    nba_positions = ["PG", "SG", "SF", "PF", "UTIL"]
+    nba_count = sum(1 for pos in nba_positions if pos in positions_str)
+    
+    if nfl_count > nba_count:
+        return "NFL"
+    elif nba_count > 0:
+        return "NBA"
+    else:
+        return "NBA"  # Default
 
 
 def calculate_player_leverage(row):
@@ -292,6 +334,8 @@ if "edited_df" not in st.session_state:
     st.session_state["edited_df"] = st.session_state["slate_df"].copy()
 if "optimal_lineups_results" not in st.session_state:
     st.session_state["optimal_lineups_results"] = {"lineups": [], "ran": False}
+if "sport" not in st.session_state:
+    st.session_state["sport"] = "NBA"
 
 
 # -------------------------------------------------------------------
@@ -913,8 +957,13 @@ if load_btn:
             loaded_df = load_and_preprocess_data(pasted_csv_data)
             st.session_state["slate_df"] = loaded_df
             st.session_state["edited_df"] = loaded_df.copy()
+            
+            # Detect sport
+            detected_sport = detect_sport(loaded_df)
+            st.session_state["sport"] = detected_sport
+            
             if not loaded_df.empty:
-                st.sidebar.success(f"✅ Loaded {len(loaded_df)} players.")
+                st.sidebar.success(f"✅ Loaded {len(loaded_df)} players ({detected_sport})")
                 
                 # Show game environment analysis
                 if "GameID" in loaded_df.columns:
@@ -929,7 +978,9 @@ if load_btn:
 
 
 # Main – builder + results
-st.title("🏀 NBA DFS Lineup Builder (Enhanced Correlation)")
+detected_sport = st.session_state.get("sport", "NBA")
+sport_emoji = "🏀" if detected_sport == "NBA" else "🏈"
+st.title(f"{sport_emoji} {detected_sport} DFS Lineup Builder (Enhanced Correlation)")
 
 slate_df = st.session_state["slate_df"]
 
