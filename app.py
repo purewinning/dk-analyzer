@@ -7,12 +7,7 @@ from pandas.api.types import CategoricalDtype
 import streamlit as st
 
 from builder import (
-    build_template_from_params,
-    generate_top_n_lineups,
     ownership_bucket,
-    PUNT_THR,
-    CHALK_THR,
-    MEGA_CHALK_THR,
     DEFAULT_SALARY_CAP,
     DEFAULT_ROSTER_SIZE,
 )
@@ -22,7 +17,7 @@ from builder import (
 # -------------------------------------------------------------------
 st.set_page_config(layout="wide", page_title="NBA DFS Lineup Builder")
 
-MIN_GAMES_REQUIRED = 2
+MIN_GAMES_REQUIRED = 2  # kept for future, not used directly now
 
 # -------------------------------------------------------------------
 # CSV MAPPING / EDGE CALCS
@@ -338,9 +333,7 @@ def assign_lineup_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
     return result_df
 
 
-def display_lineups(
-    slate_df: pd.DataFrame, template, lineup_list: List[Dict[str, Any]]
-):
+def display_lineups(slate_df: pd.DataFrame, lineup_list: List[Dict[str, Any]]):
     if not lineup_list:
         st.error("❌ No lineups to display.")
         return
@@ -357,11 +350,7 @@ def display_lineups(
     with c1:
         st.metric("Projected Points", f"{best['proj_score']:.2f}")
     with c2:
-        st.metric(
-            "Salary Used",
-            f"${salary_used:,}",
-            delta=f"${template.salary_cap - salary_used:,} remaining",
-        )
+        st.metric("Salary Used", f"${salary_used:,}")
     with c3:
         st.metric("Total Ownership", f"{total_own:.1f}%")
 
@@ -439,59 +428,21 @@ def display_lineups(
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
 
-def get_builder_params(contest_label: str, field_size: int):
+def get_builder_style(contest_label: str, field_size: int) -> str:
     """
-    Use contest type + field size to pick contest_code and pct_to_first.
+    Decide "style" for scoring (cash vs SE vs 20-max vs milly).
     """
-    if field_size < 2000:
-        size_bucket = "small"
-    elif field_size < 10000:
-        size_bucket = "medium"
-    elif field_size < 50000:
-        size_bucket = "large"
-    else:
-        size_bucket = "massive"
-
-    contest_code = "SE"
-    pct_to_first = 0.20
-
     if contest_label == "Cash Game (50/50, Double-Up)":
-        contest_code = "CASH"
-        pct_to_first = 0.10
-
-    elif contest_label == "Single Entry":
-        contest_code = "SE"
-        if size_bucket == "small":
-            pct_to_first = 0.18
-        elif size_bucket == "medium":
-            pct_to_first = 0.20
-        else:
-            pct_to_first = 0.22
-
-    elif contest_label == "3-Max":
-        contest_code = "SE"
-        if size_bucket in ["small", "medium"]:
-            pct_to_first = 0.20
-        else:
-            pct_to_first = 0.22
-
-    elif contest_label == "20-Max":
-        contest_code = "LARGE_GPP"
-        if size_bucket == "small":
-            pct_to_first = 0.18
-        elif size_bucket == "medium":
-            pct_to_first = 0.20
-        else:
-            pct_to_first = 0.22
-
-    elif contest_label == "150-Max (Milly Maker)":
-        contest_code = "LARGE_GPP"
-        if size_bucket in ["large", "massive"]:
-            pct_to_first = 0.25
-        else:
-            pct_to_first = 0.22
-
-    return contest_code, int(field_size), float(pct_to_first)
+        return "cash"
+    if contest_label == "Single Entry":
+        return "single_entry"
+    if contest_label == "3-Max":
+        return "three_max"
+    if contest_label == "20-Max":
+        return "twenty_max"
+    if contest_label == "150-Max (Milly Maker)":
+        return "milly"
+    return "single_entry"
 
 
 def get_default_n_lineups(contest_label: str) -> int:
@@ -508,32 +459,133 @@ def get_default_n_lineups(contest_label: str) -> int:
     return 10
 
 
-def get_default_bucket_slack(contest_label: str, field_size: int) -> int:
-    if field_size < 2000:
-        size_bucket = "small"
-    elif field_size < 10000:
-        size_bucket = "medium"
-    elif field_size < 50000:
-        size_bucket = "large"
-    else:
-        size_bucket = "massive"
+def get_edge_weights(contest_style: str) -> Dict[str, float]:
+    """
+    Weights for projection / gpp_score / leverage / ownership by contest type.
+    Higher own penalty + leverage weight = more contrarian.
+    """
+    if contest_style == "cash":
+        return {"proj": 1.0, "gpp": 0.1, "lev": 0.0, "own": 0.0}
+    if contest_style == "single_entry":
+        return {"proj": 0.8, "gpp": 0.6, "lev": 0.3, "own": 0.05}
+    if contest_style == "three_max":
+        return {"proj": 0.7, "gpp": 0.8, "lev": 0.4, "own": 0.10}
+    if contest_style == "twenty_max":
+        return {"proj": 0.6, "gpp": 1.0, "lev": 0.6, "own": 0.15}
+    if contest_style == "milly":
+        return {"proj": 0.5, "gpp": 1.2, "lev": 0.8, "own": 0.25}
+    return {"proj": 0.8, "gpp": 0.6, "lev": 0.3, "own": 0.05}
 
-    if contest_label == "Cash Game (50/50, Double-Up)":
-        base = 1
-    elif contest_label in ["Single Entry", "3-Max"]:
-        base = 2
-    elif contest_label == "20-Max":
-        base = 3
-    else:  # 150-Max
-        base = 4
 
-    if size_bucket == "small":
-        return max(0, base - 1)
-    if size_bucket == "medium":
-        return base
-    if size_bucket == "large":
-        return min(6, base + 1)
-    return min(6, base + 2)
+def build_simple_lineups(
+    df: pd.DataFrame,
+    contest_style: str,
+    n_lineups: int,
+    salary_cap: int,
+    roster_size: int,
+    locked_ids: List[str],
+    excluded_ids: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    Lineup builder with edge logic:
+    - Uses proj + gpp_score + leverage - ownership penalty
+    - Weights depend on contest_style (cash vs SE vs 20-max vs milly)
+    - Always respects locks/excludes, salary cap, roster size
+    """
+
+    # Filter out excluded upfront
+    pool = df[~df["player_id"].isin(excluded_ids)].copy()
+
+    # Make sure locks are in pool
+    locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
+
+    if len(locks_df) > roster_size:
+        return []  # impossible
+
+    lock_salary = locks_df["salary"].sum()
+    if lock_salary > salary_cap:
+        return []  # impossible
+
+    # Fill NaNs just in case
+    for col in ["proj", "gpp_score", "leverage_score", "own_proj"]:
+        if col in pool.columns:
+            pool[col] = pool[col].fillna(0)
+
+    weights = get_edge_weights(contest_style)
+
+    # gpp_score can be 0–100; scale it down so it's in the same ballpark
+    # as projection, then apply weights.
+    pool["edge_score_base"] = (
+        weights["proj"] * pool["proj"]
+        + weights["gpp"] * (pool["gpp_score"] / 3.0)
+        + weights["lev"] * pool["leverage_score"]
+        - weights["own"] * pool["own_proj"]
+    )
+
+    lineups = []
+
+    for i in range(n_lineups):
+        used_ids = set(locked_ids)
+        current_salary = lock_salary
+        lineup_players = list(locks_df["player_id"])
+
+        # Tiny noise per lineup so we don't get the same thing every time
+        noise = np.random.normal(0, 0.5, size=len(pool))
+        pool["edge_score"] = pool["edge_score_base"] + noise
+
+        # Sort by edge_score
+        candidates = pool.sort_values("edge_score", ascending=False)
+
+        for _, row in candidates.iterrows():
+            pid = row["player_id"]
+            if pid in used_ids:
+                continue
+            if len(lineup_players) >= roster_size:
+                break
+            if current_salary + row["salary"] > salary_cap:
+                continue
+            lineup_players.append(pid)
+            used_ids.add(pid)
+            current_salary += row["salary"]
+
+        # If we couldn't fill, try a second pass by cheapest salary
+        if len(lineup_players) < roster_size:
+            remaining = pool[~pool["player_id"].isin(used_ids)].sort_values("salary")
+            for _, row in remaining.iterrows():
+                if len(lineup_players) >= roster_size:
+                    break
+                pid = row["player_id"]
+                if current_salary + row["salary"] > salary_cap:
+                    continue
+                lineup_players.append(pid)
+                used_ids.add(pid)
+                current_salary += row["salary"]
+
+        if len(lineup_players) != roster_size:
+            # If still not full, skip this lineup
+            continue
+
+        lineup_proj = float(
+            pool[pool["player_id"].isin(lineup_players)]["proj"].sum()
+        )
+        lineups.append(
+            {
+                "player_ids": lineup_players,
+                "proj_score": lineup_proj,
+            }
+        )
+
+    # Deduplicate lineups by player set
+    unique_lineups = []
+    seen = set()
+    for lu in lineups:
+        key = tuple(sorted(lu["player_ids"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_lineups.append(lu)
+
+    return unique_lineups
 
 
 # -------------------------------------------------------------------
@@ -571,21 +623,8 @@ n_lineups = st.sidebar.slider(
     value=default_n,
 )
 
-contest_code, builder_field_size, pct_to_first = get_builder_params(
-    contest_type_label, int(field_size)
-)
-st.sidebar.caption(
-    f"Template: {contest_code} | Field: {builder_field_size:,} | 1st: {pct_to_first*100:.1f}%"
-)
-
-default_slack = get_default_bucket_slack(contest_type_label, int(field_size))
-bucket_slack = st.sidebar.slider(
-    "Ownership Bucket Flex",
-    min_value=0,
-    max_value=6,
-    value=default_slack,
-    help="Higher = looser on ownership buckets (more contrarian / weird).",
-)
+contest_style = get_builder_style(contest_type_label, int(field_size))
+st.sidebar.caption(f"Build style: **{contest_style}** (weights proj / upside / leverage / ownership)")
 
 st.sidebar.markdown("---")
 pasted_csv_data = st.sidebar.text_area(
@@ -610,7 +649,7 @@ if load_btn:
 
 
 # Main – builder + results
-st.title("NBA DFS Lineup Builder")
+st.title("NBA DFS Lineup Builder (Edge-Aware)")
 
 slate_df = st.session_state["slate_df"]
 
@@ -702,87 +741,33 @@ else:
                 f"❌ Conflict: {', '.join(sorted(conflict))} are both locked and excluded."
             )
         else:
-            final_df = edited_df.copy()
-
-            merge_cols = [
-                "player_id",
-                "bucket",
-                "GameID",
-                "Team",
-                "Opponent",
-                "edge_category",
-                "leverage_score",
-                "ceiling",
-                "gpp_score",
-                "value",
-            ]
-            merge_cols = [c for c in merge_cols if c in slate_df.columns]
-            drop_cols = [
-                c for c in merge_cols if c in final_df.columns and c != "player_id"
-            ]
-            if drop_cols:
-                final_df = final_df.drop(columns=drop_cols)
-            final_df = final_df.merge(
-                slate_df[merge_cols],
-                on="player_id",
-                how="left",
-            )
-
-            template = build_template_from_params(
-                contest_type=contest_code,
-                field_size=builder_field_size,
-                pct_to_first=pct_to_first,
-                roster_size=DEFAULT_ROSTER_SIZE,
-                salary_cap=DEFAULT_SALARY_CAP,
-                min_games=MIN_GAMES_REQUIRED,
-            )
-
-            with st.spinner("Building lineups..."):
-                top_lineups = generate_top_n_lineups(
-                    slate_df=final_df,
-                    template=template,
+            with st.spinner("Building lineups with upside + leverage logic..."):
+                lineups = build_simple_lineups(
+                    df=edited_df,
+                    contest_style=contest_style,
                     n_lineups=n_lineups,
-                    bucket_slack=bucket_slack,
-                    locked_player_ids=locked_ids,
-                    excluded_player_ids=excluded_ids,
+                    salary_cap=DEFAULT_SALARY_CAP,
+                    roster_size=DEFAULT_ROSTER_SIZE,
+                    locked_ids=locked_ids,
+                    excluded_ids=excluded_ids,
                 )
 
-                # Fallback: try max slack if nothing came back
-                if not top_lineups:
-                    top_lineups = generate_top_n_lineups(
-                        slate_df=final_df,
-                        template=template,
-                        n_lineups=n_lineups,
-                        bucket_slack=6,
-                        locked_player_ids=locked_ids,
-                        excluded_player_ids=excluded_ids,
-                    )
-
-            if not top_lineups:
+            if not lineups:
                 st.error(
                     "❌ Could not generate any valid lineups.\n\n"
-                    "This is coming directly from generate_top_n_lineups.\n"
+                    "Even with edge-based logic, locks + salary + roster size could not be satisfied.\n"
                     "Try reducing locks/excludes or broadening your pool."
                 )
             else:
                 st.session_state["optimal_lineups_results"] = {
-                    "lineups": top_lineups,
+                    "lineups": lineups,
                     "ran": True,
                 }
-                st.success(f"✅ Built {len(top_lineups)} lineups.")
+                st.success(f"✅ Built {len(lineups)} lineups.")
 
     if st.session_state["optimal_lineups_results"].get("ran", False):
         st.markdown("---")
-        template = build_template_from_params(
-            contest_type=contest_code,
-            field_size=builder_field_size,
-            pct_to_first=pct_to_first,
-            roster_size=DEFAULT_ROSTER_SIZE,
-            salary_cap=DEFAULT_SALARY_CAP,
-            min_games=MIN_GAMES_REQUIRED,
-        )
         display_lineups(
             slate_df,
-            template,
             st.session_state["optimal_lineups_results"]["lineups"],
         )
