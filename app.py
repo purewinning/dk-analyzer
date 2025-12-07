@@ -690,7 +690,7 @@ def display_multiple_lineups(slate_df, template, lineup_list):
                 "Avg Leverage": "{:+.1f}",
                 "GPP Score": "{:.1f}",
                 "Salary": "${:,}"
-            }).background_gradient(subset=['Avg Leverage'], cmap='RdYlGn'),
+            }),
             use_container_width=True
         )
         
@@ -705,7 +705,7 @@ def display_multiple_lineups(slate_df, template, lineup_list):
                 "Avg Leverage": "{:+.1f}",
                 "GPP Score": "{:.1f}",
                 "Salary": "${:,}"
-            }).background_gradient(subset=['Avg Leverage'], cmap='RdYlGn'),
+            }),
             use_container_width=True
         )
         
