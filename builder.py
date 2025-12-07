@@ -1,7 +1,7 @@
 import random
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter  # 👈 MUST include Counter
 
 import numpy as np
 import pandas as pd
