@@ -307,7 +307,7 @@ def _build_correlated_lineup(
     game_envs: Dict[str, Dict[str, Any]],
     team_stacks: Dict[str, List[Dict[str, Any]]],
     correlation_strength: float = 0.7,
-    max_salary_leaving: int = 1000,
+    max_salary_leaving: int = 5000,
     rng: Optional[random.Random] = None,
 ) -> Optional[Tuple[List[str], float]]:
     """
@@ -457,7 +457,8 @@ def generate_top_n_lineups(
     slate_df: pd.DataFrame,
     template: LineupTemplate,
     n_lineups: int = 10,
-    correlation_strength: float = 0.7,  # NEW: 0.0-1.0, how aggressive to stack
+    correlation_strength: float = 0.7,
+    max_salary_leaving: int = 5000,  # Max $5K left (10% of $50K cap)
     locked_player_ids: Optional[List[str]] = None,
     excluded_player_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
@@ -499,7 +500,9 @@ def generate_top_n_lineups(
     for _ in range(attempts):
         result = _build_correlated_lineup(
             pool, template, locked_player_ids, game_envs, team_stacks,
-            correlation_strength=correlation_strength, rng=rng
+            correlation_strength=correlation_strength,
+            max_salary_leaving=max_salary_leaving,
+            rng=rng
         )
         
         if result is None:
