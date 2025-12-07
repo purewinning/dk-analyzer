@@ -7,7 +7,7 @@ import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
-# Import from enhanced builder
+# Import from builder
 from builder import (
     ownership_bucket,
     build_game_environments,
@@ -595,7 +595,7 @@ def build_enhanced_lineups(
     
     The correlation_strength parameter balances these approaches.
     """
-    from builder_enhanced import generate_top_n_lineups, LineupTemplate
+    from builder import generate_top_n_lineups, LineupTemplate
     
     # Filter out excluded upfront
     pool = df[~df["player_id"].isin(excluded_ids)].copy()
