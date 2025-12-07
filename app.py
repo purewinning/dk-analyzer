@@ -205,8 +205,20 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
             df = pd.read_csv(data_io)
 
         df.columns = df.columns.str.strip()
-
+        
+        # Create case-insensitive mapping
         actual_map = {}
+        for csv_name, internal_name in REQUIRED_CSV_TO_INTERNAL_MAP.items():
+            # Check for exact match first
+            if csv_name in df.columns:
+                actual_map[csv_name] = internal_name
+            else:
+                # Try case-insensitive match
+                for col in df.columns:
+                    if col.lower() == csv_name.lower():
+                        actual_map[col] = internal_name
+                        break
+        
         required_internal = [
             "Name",
             "salary",
@@ -216,9 +228,6 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
             "proj",
             "own_proj",
         ]
-        for csv_name, internal_name in REQUIRED_CSV_TO_INTERNAL_MAP.items():
-            if csv_name in df.columns:
-                actual_map[csv_name] = internal_name
 
         mapped_internal_names = set(actual_map.values())
         final_missing_internal = [
@@ -816,6 +825,9 @@ def build_enhanced_lineups(
     # Filter out excluded upfront
     pool = df[~df["player_id"].isin(excluded_ids)].copy()
     
+    # Debug: Show what columns we have
+    available_cols = list(pool.columns)
+    
     # Check if we have columns needed for correlation
     has_team_data = "Team" in pool.columns and "GameID" in pool.columns
     has_correlation_cols = all(col in pool.columns for col in ["ceiling", "value", "own_proj"])
@@ -825,11 +837,20 @@ def build_enhanced_lineups(
         missing = []
         if not has_team_data:
             missing.append("Team/Opponent")
+            if "Team" not in pool.columns:
+                missing.append("(Team column missing)")
+            if "GameID" not in pool.columns:
+                missing.append("(GameID column missing)")
         if not has_correlation_cols:
-            missing.append("edge metrics")
+            missing_edge = [c for c in ["ceiling", "value", "own_proj"] if c not in pool.columns]
+            missing.append(f"edge metrics ({', '.join(missing_edge)})")
         
         st.warning(f"⚠️ Missing {', '.join(missing)} - using simplified lineup building without correlation")
         st.info("💡 For correlation/stacking, your CSV needs: Player, Salary, Position, Team, Opponent, Projection, Ownership")
+        
+        # Show available columns for debugging
+        with st.expander("🔍 Debug: Available columns"):
+            st.write(available_cols)
         
         # Fall back to basic building
         return build_simple_fallback_lineups(
