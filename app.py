@@ -254,9 +254,16 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
     # Basic cleaning
     df["Team"] = df["Team"].astype(str)
     df["Opponent"] = df["Opponent"].astype(str)
-    df["GameID"] = df.apply(
-        lambda row: "@".join(sorted([row["Team"], row["Opponent"]])), axis=1
-    )
+    
+    # Create GameID if we have Team and Opponent (optional, not required)
+    if "Team" in df.columns and "Opponent" in df.columns:
+        df["GameID"] = df.apply(
+            lambda row: "@".join(sorted([row["Team"], row["Opponent"]])), axis=1
+        )
+    else:
+        # If no Team/Opponent, create empty GameID
+        df["GameID"] = ""
+    
     df["player_id"] = df["Name"]
 
     df["own_proj"] = (
@@ -829,7 +836,26 @@ def build_enhanced_lineups(
     available_cols = list(pool.columns)
     
     # Check if we have columns needed for correlation
-    has_team_data = "Team" in pool.columns and "GameID" in pool.columns
+    # Just need Team column - GameID will be created automatically
+    has_team_data = "Team" in pool.columns
+    has_correlation_cols = all(col in pool.columns for col in ["proj", "own_proj"])
+    
+    # Value can be from CSV or calculated
+    if "value" not in pool.columns and "Value" in pool.columns:
+        pool["value"] = pool["Value"]
+    elif "value" not in pool.columns:
+        # Calculate value if not present
+        pool["value"] = np.where(
+            pool["salary"] > 0,
+            (pool["proj"] / (pool["salary"] / 1000)).round(2),
+            0.0
+        )
+    
+    # Ceiling can be calculated if not present
+    if "ceiling" not in pool.columns:
+        pool["ceiling"] = pool["proj"] * 1.35
+    
+    # Now check again
     has_correlation_cols = all(col in pool.columns for col in ["ceiling", "value", "own_proj"])
     
     # If missing correlation data, warn and fall back to simpler building
@@ -837,13 +863,10 @@ def build_enhanced_lineups(
         missing = []
         if not has_team_data:
             missing.append("Team/Opponent")
-            if "Team" not in pool.columns:
-                missing.append("(Team column missing)")
-            if "GameID" not in pool.columns:
-                missing.append("(GameID column missing)")
         if not has_correlation_cols:
             missing_edge = [c for c in ["ceiling", "value", "own_proj"] if c not in pool.columns]
-            missing.append(f"edge metrics ({', '.join(missing_edge)})")
+            if missing_edge:
+                missing.append(f"columns: {', '.join(missing_edge)}")
         
         st.warning(f"⚠️ Missing {', '.join(missing)} - using simplified lineup building without correlation")
         st.info("💡 For correlation/stacking, your CSV needs: Player, Salary, Position, Team, Opponent, Projection, Ownership")
@@ -860,6 +883,12 @@ def build_enhanced_lineups(
             salary_cap=salary_cap,
             roster_size=roster_size,
             locked_ids=locked_ids,
+        )
+    
+    # Ensure GameID exists before building (create from Team + Opponent)
+    if "GameID" not in pool.columns and "Team" in pool.columns and "Opponent" in pool.columns:
+        pool["GameID"] = pool.apply(
+            lambda row: "@".join(sorted([str(row["Team"]), str(row["Opponent"])])), axis=1
         )
     
     # Branch to sport-specific building
