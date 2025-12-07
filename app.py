@@ -68,11 +68,20 @@ def load_and_normalize_csv(file: io.BytesIO) -> pd.DataFrame:
     df = normalize_column(df, PROJECTION_COLS, "proj")
     df = normalize_column(df, OWNERSHIP_COLS, "own_proj")
 
-    required = ["player_id", "Name", "Team", "positions", "Salary", "proj"]
+    # Required *from your CSV* (player_id will be generated if missing)
+    required = ["Name", "Team", "positions", "Salary", "proj"]
     missing = [col for col in required if col not in df.columns]
     if missing:
         st.error(f"CSV is missing required columns: {missing}")
         return pd.DataFrame()
+
+    # If no player_id, auto-generate one from existing info
+    if "player_id" not in df.columns:
+        df["player_id"] = (
+            df["Name"].astype(str)
+            + "_" + df["Team"].astype(str)
+            + "_" + df["Salary"].astype(str)
+        )
 
     if "own_proj" not in df.columns:
         df["own_proj"] = np.nan
@@ -819,4 +828,3 @@ def main():
 
 # Call main unconditionally so Streamlit always runs it
 main()
-
