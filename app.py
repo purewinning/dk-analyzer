@@ -1,4 +1,4 @@
-import io
+ximport io
 from typing import Dict, Any, List
 from collections import Counter
 
@@ -803,16 +803,13 @@ def build_enhanced_lineups(
     roster_size: int,
     locked_ids: List[str],
     excluded_ids: List[str],
+    sport: str = "NBA",
     max_tries_per_lineup: int = 3000,
 ) -> List[Dict[str, Any]]:
     """
     Enhanced lineup builder with correlation and stacking.
     
-    This version uses both:
-    1. Edge-weighted random selection (projection + GPP score - ownership)
-    2. Correlation logic (game stacks, team stacks, bring-backs)
-    
-    The correlation_strength parameter balances these approaches.
+    Supports both NBA and NFL with sport-specific logic.
     """
     from builder import generate_top_n_lineups, LineupTemplate
     
@@ -844,6 +841,42 @@ def build_enhanced_lineups(
             locked_ids=locked_ids,
         )
     
+    # Branch to sport-specific building
+    if sport == "NFL":
+        return build_nfl_lineups(
+            pool=pool,
+            contest_style=contest_style,
+            correlation_strength=correlation_strength,
+            n_lineups=n_lineups,
+            salary_cap=salary_cap,
+            roster_size=roster_size,
+            locked_ids=locked_ids,
+        )
+    else:  # NBA
+        return build_nba_lineups(
+            pool=pool,
+            contest_style=contest_style,
+            correlation_strength=correlation_strength,
+            n_lineups=n_lineups,
+            salary_cap=salary_cap,
+            roster_size=roster_size,
+            locked_ids=locked_ids,
+        )
+    
+def build_nba_lineups(
+    pool: pd.DataFrame,
+    contest_style: str,
+    correlation_strength: float,
+    n_lineups: int,
+    salary_cap: int,
+    roster_size: int,
+    locked_ids: List[str],
+) -> List[Dict[str, Any]]:
+    """
+    NBA-specific lineup builder using existing correlation logic.
+    """
+    from builder import generate_top_n_lineups, LineupTemplate
+    
     # Validate locks
     locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
     if len(locks_df) > roster_size:
@@ -861,26 +894,205 @@ def build_enhanced_lineups(
     # Create template
     template = LineupTemplate(
         contest_type=contest_style,
-        field_size=5000,  # Not used in this simplified version
+        field_size=5000,
         pct_to_first=0.1,
         roster_size=roster_size,
         salary_cap=salary_cap,
         min_games=2,
     )
     
-    # Generate lineups with correlation
+    # Generate lineups with NBA correlation (game/team stacks)
     lineups = generate_top_n_lineups(
         slate_df=pool,
         template=template,
         n_lineups=n_lineups,
         correlation_strength=correlation_strength,
         locked_player_ids=locked_ids,
-        excluded_player_ids=excluded_ids,
+        excluded_player_ids=[],  # Already filtered
     )
     
     return lineups
 
 
+def build_nfl_lineups(
+    pool: pd.DataFrame,
+    contest_style: str,
+    correlation_strength: float,
+    n_lineups: int,
+    salary_cap: int,
+    roster_size: int,
+    locked_ids: List[str],
+    max_attempts: int = 8000,
+) -> List[Dict[str, Any]]:
+    """
+    NFL-specific lineup builder with QB stacking logic.
+    """
+    import numpy as np
+    from nfl_stacks import build_nfl_stacks, identify_nfl_bringback, validate_nfl_lineup, calculate_nfl_correlation_score
+    from builder import build_game_environments
+    
+    # Validate locks
+    locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
+    if len(locks_df) > roster_size:
+        return []
+    
+    lock_salary = int(locks_df["salary"].sum()) if not locks_df.empty else 0
+    if lock_salary > salary_cap:
+        return []
+    
+    # Fill NaNs
+    for col in ["proj", "salary", "own_proj", "ceiling", "value"]:
+        if col in pool.columns:
+            pool[col] = pool[col].fillna(0)
+    
+    # Build NFL stacks
+    nfl_stacks = build_nfl_stacks(pool)
+    qb_stacks = nfl_stacks.get("qb_stacks", {})
+    rb_dst_stacks = nfl_stacks.get("rb_dst_stacks", {})
+    
+    # Build game environments
+    game_envs = build_game_environments(pool)
+    
+    # Minimum salary usage
+    min_salary = salary_cap * 0.90
+    max_salary_left = salary_cap - min_salary
+    
+    lineups: List[Dict[str, Any]] = []
+    seen_sets = set()
+    rng = np.random.default_rng(42)
+    
+    attempts = 0
+    while len(lineups) < n_lineups and attempts < max_attempts:
+        attempts += 1
+        
+        # Start with locks
+        lineup_ids = list(locks_df["player_id"])
+        current_salary = lock_salary
+        remaining = roster_size - len(lineup_ids)
+        
+        if remaining <= 0:
+            break
+        
+        # Decide on stack type based on correlation_strength
+        use_qb_stack = rng.random() < correlation_strength
+        
+        if use_qb_stack and remaining >= 2 and qb_stacks:
+            # Try QB stack
+            teams_with_stacks = list(qb_stacks.keys())
+            if teams_with_stacks:
+                team = rng.choice(teams_with_stacks)
+                stacks = qb_stacks[team]
+                if stacks:
+                    stack = rng.choice(stacks[:5])  # Top 5 stacks
+                    
+                    stack_ids = [stack["qb"], stack["pass_catcher"]]
+                    stack_df = pool[pool["player_id"].isin(stack_ids)]
+                    stack_salary = int(stack_df["salary"].sum())
+                    
+                    if len(stack_df) == 2 and stack_salary <= (salary_cap - current_salary):
+                        lineup_ids.extend(stack_ids)
+                        current_salary += stack_salary
+                        remaining -= 2
+        
+        # Fill remaining spots with smart salary allocation
+        available = pool[~pool["player_id"].isin(lineup_ids)].copy()
+        
+        for slot_num in range(remaining):
+            if available.empty:
+                break
+            
+            slots_left_after = remaining - slot_num - 1
+            cap_left = salary_cap - current_salary
+            
+            # Calculate salary range for this slot
+            if slots_left_after > 0:
+                max_this_slot = cap_left - (slots_left_after * 3000)
+                min_this_slot = max(3000, cap_left - (slots_left_after * 10000))
+            else:
+                max_this_slot = cap_left
+                min_this_slot = max(3000, cap_left - max_salary_left)
+            
+            # Filter to valid salary range
+            candidates = available[
+                (available["salary"] >= min_this_slot) &
+                (available["salary"] <= max_this_slot)
+            ].copy()
+            
+            if candidates.empty:
+                candidates = available[available["salary"] <= cap_left].copy()
+            
+            if candidates.empty:
+                break
+            
+            # Score candidates
+            candidates["score"] = (
+                candidates["proj"] * 1.0 +
+                candidates["value"] * 2.0 -
+                candidates["own_proj"] * 0.05
+            )
+            
+            # Add randomness
+            candidates["score"] = candidates["score"] * (0.85 + rng.random(len(candidates)) * 0.3)
+            
+            # Pick best
+            best = candidates.nlargest(1, "score")
+            if best.empty:
+                break
+            
+            chosen = best.iloc[0]
+            lineup_ids.append(chosen["player_id"])
+            current_salary += int(chosen["salary"])
+            
+            available = available[available["player_id"] != chosen["player_id"]]
+        
+        # Validate lineup
+        if len(lineup_ids) != roster_size:
+            continue
+        
+        if current_salary > salary_cap:
+            continue
+        
+        if salary_cap - current_salary > max_salary_left:
+            continue
+        
+        # Check NFL anti-correlations
+        lineup_df = pool[pool["player_id"].isin(lineup_ids)]
+        if not validate_nfl_lineup(lineup_df):
+            continue  # Has bad correlation (QB vs DST)
+        
+        # Check uniqueness
+        key = tuple(sorted(lineup_ids))
+        if key in seen_sets:
+            continue
+        seen_sets.add(key)
+        
+        # Calculate stats
+        proj_score = float(lineup_df["proj"].sum())
+        corr_score = calculate_nfl_correlation_score(lineup_df, game_envs)
+        
+        lineups.append({
+            "player_ids": lineup_ids,
+            "proj_score": proj_score,
+            "salary_used": current_salary,
+            "correlation_score": corr_score,
+            "num_games": lineup_df["GameID"].nunique(),
+            "num_teams": lineup_df["Team"].nunique(),
+        })
+    
+    # Sort by projection + correlation
+    for lu in lineups:
+        norm_corr = lu["correlation_score"] / 100.0
+        lu["composite_score"] = (
+            lu["proj_score"] * 0.7 +
+            norm_corr * 50 * correlation_strength
+        )
+    
+    lineups = sorted(lineups, key=lambda x: x["composite_score"], reverse=True)
+    return lineups[:n_lineups]
+
+
+# Old code below this point - keeping for reference
+# This is the original that called the builder template
 # -------------------------------------------------------------------
 # UI
 # -------------------------------------------------------------------
@@ -1104,7 +1316,9 @@ else:
                             f"Unlock a high-salary player or two."
                         )
                     else:
-                        with st.spinner("Building correlated lineups with stacking logic..."):
+                        detected_sport = st.session_state.get("sport", "NBA")
+                        sport_name = "NBA" if detected_sport == "NBA" else "NFL"
+                        with st.spinner(f"Building {sport_name} lineups with stacking logic..."):
                             lineups = build_enhanced_lineups(
                                 df=edited_df,
                                 contest_style=contest_style,
@@ -1114,6 +1328,7 @@ else:
                                 roster_size=roster_size,
                                 locked_ids=locked_ids,
                                 excluded_ids=excluded_ids,
+                                sport=detected_sport,
                             )
 
                         if not lineups:
