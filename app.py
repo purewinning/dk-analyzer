@@ -32,39 +32,26 @@ st.set_page_config(
 )
 
 # --------------------------------------------------------------------------------------
-# COLUMN NAME NORMALIZATION
+# NORMALIZATION HELPERS
 # --------------------------------------------------------------------------------------
 
-PLAYER_ID_COLS = ["Id", "ID", "Player ID", "PlayerID"]
-NAME_COLS = ["Name", "Player", "Player Name"]
-TEAM_COLS = ["Team", "Tm"]
-OPPONENT_COLS = ["Opponent", "Opp", "Opp Team"]
-POSITION_COLS = ["Position", "Pos", "Positions"]
-SALARY_COLS = ["Salary", "Sal", "Cost"]
-PROJECTION_COLS = ["Projection", "Proj", "Fpts", "FPTS", "Points"]
-OWNERSHIP_COLS = ["Ownership", "Own", "Exposure", "Proj Own", "Own%"]
-
-
-def normalize_column(df: pd.DataFrame, possible_names: List[str], new_name: str) -> pd.DataFrame:
-    """(Unused now; kept for future) Rename any matching columns from possible_names to new_name if found."""
-    for col in possible_names:
-        if col in df.columns:
-            df = df.rename(columns={col: new_name})
-            break
-    return df
-
-
-def load_and_normalize_csv(file: io.BytesIO) -> pd.DataFrame:
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Load CSV, normalize columns and perform basic cleanup.
+    Normalize DraftKings-style projections CSV into the internal schema.
 
-    Designed to work with DraftKings-style files like:
-    Player, Salary, Position, Team, Opponent, Projection, Value, Ownership
-    and with minor header variations.
+    Expected common columns (case/space-insensitive):
+      - Player
+      - Salary
+      - Position
+      - Team
+      - Opponent
+      - Projection
+      - Value
+      - Ownership
     """
-    df = pd.read_csv(file)
 
     # Make header handling robust
+    df = df.copy()
     df.columns = df.columns.str.strip().str.lower()
 
     # Map many possible DK headers into our internal names
@@ -140,7 +127,7 @@ def add_ownership_bucket_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_positions(df: pd.DataFrame) -> pd.DataFrame:
-    """Create 'primary_pos' from multi-position strings like 'PG/SG'."""
+    """Create 'primary_pos' from multi-position strings like 'WR/RB'."""
     if "positions" not in df.columns:
         return df
     df["primary_pos"] = df["positions"].apply(lambda x: str(x).split("/")[0])
@@ -440,7 +427,7 @@ def sidebar_controls() -> Dict[str, Any]:
         "Min total projection",
         min_value=0.0,
         max_value=500.0,
-        value=200.0,
+        value=0.0,      # start loose so it builds something
         step=5.0,
     )
 
@@ -448,15 +435,15 @@ def sidebar_controls() -> Dict[str, Any]:
         "Approx floor (proj * 0.7)",
         min_value=0.0,
         max_value=500.0,
-        value=140.0,
+        value=0.0,      # start loose so it builds something
         step=5.0,
     )
 
     max_punts = st.sidebar.slider(
         "Max punts per lineup (ownership bucket)",
         min_value=0,
-        max_value=5,
-        value=2,
+        max_value=8,
+        value=8,        # start loose
         step=1,
     )
 
@@ -484,10 +471,10 @@ def sidebar_controls() -> Dict[str, Any]:
 
 def show_player_pool(pool: pd.DataFrame, sport: str):
     """Display player pool with filters and summary."""
-    st.subheader("Player Pool")
+    st.subheader("Player Pool (normalized)")
 
     if pool.empty:
-        st.info("Upload a CSV to show the player pool.")
+        st.info("No players available after normalization.")
         return
 
     pos_dtype = build_position_dtypes(sport)
@@ -778,7 +765,14 @@ def main():
         st.info("Please upload a CSV file to begin.")
         return
 
-    df = load_and_normalize_csv(uploaded_file)
+    # STEP 1: Raw CSV preview so we KNOW the file is loaded
+    raw_df = pd.read_csv(uploaded_file)
+    st.subheader("Raw CSV preview")
+    st.write(f"Rows: {raw_df.shape[0]}, Columns: {raw_df.shape[1]}")
+    st.dataframe(raw_df.head(), use_container_width=True)
+
+    # STEP 2: Normalize into internal format
+    df = normalize_df(raw_df)
     if df.empty:
         st.stop()
 
