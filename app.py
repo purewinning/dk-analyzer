@@ -600,6 +600,22 @@ def build_enhanced_lineups(
     # Filter out excluded upfront
     pool = df[~df["player_id"].isin(excluded_ids)].copy()
     
+    # Ensure required columns exist for correlation
+    required_cols = ["player_id", "salary", "proj", "GameID", "Team"]
+    missing_cols = [col for col in required_cols if col not in pool.columns]
+    if missing_cols:
+        st.error(f"❌ Missing required columns for correlation: {', '.join(missing_cols)}")
+        st.error("Make sure your CSV has Team and Opponent columns!")
+        return []
+    
+    # Ensure correlation helper columns exist
+    correlation_cols = ["ceiling", "value", "own_proj"]
+    missing_corr = [col for col in correlation_cols if col not in pool.columns]
+    if missing_corr:
+        st.error(f"❌ Missing columns needed for correlation: {', '.join(missing_corr)}")
+        st.error("This shouldn't happen - data preprocessing may have failed.")
+        return []
+    
     # Validate locks
     locks_df = pool[pool["player_id"].isin(locked_ids)].copy()
     if len(locks_df) > roster_size:
@@ -609,8 +625,8 @@ def build_enhanced_lineups(
     if lock_salary > salary_cap:
         return []
     
-    # Fill NaNs
-    for col in ["proj", "gpp_score", "own_proj", "ceiling", "value"]:
+    # Fill NaNs for all numeric columns needed
+    for col in ["proj", "gpp_score", "own_proj", "ceiling", "value", "leverage_score"]:
         if col in pool.columns:
             pool[col] = pool[col].fillna(0)
     
