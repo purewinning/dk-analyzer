@@ -624,38 +624,118 @@ def generate_lineup_set(
 # -------------------------------------------------------------------
 
 def assign_positions(lineup_df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
-    """Assign optimal positions to lineup."""
+    """Assign optimal positions to lineup with strict validation."""
     config = SPORT_CONFIGS[sport]
     
     assigned = set()
     assignments = {}
     
-    # Get slot order (specific first, flex last)
-    slots = list(config.primary_positions) + config.flex_positions
+    if sport == Sport.NFL:
+        # NFL requires strict order: QB, RB(2), WR(3), TE, FLEX, DST
+        slot_order = ["QB", "DST", "TE", "RB", "RB", "WR", "WR", "WR", "FLEX"]
+        
+        for slot in slot_order:
+            available = lineup_df[~lineup_df["player_id"].isin(assigned)]
+            
+            if available.empty:
+                st.error(f"❌ Cannot fill {slot} - no players available")
+                break
+            
+            # Filter to eligible players
+            def is_eligible(pos_string):
+                if pd.isna(pos_string):
+                    return False
+                positions = [p.strip().upper() for p in str(pos_string).split("/")]
+                
+                if slot == "QB":
+                    return "QB" in positions
+                elif slot == "RB":
+                    return "RB" in positions
+                elif slot == "WR":
+                    return "WR" in positions
+                elif slot == "TE":
+                    return "TE" in positions
+                elif slot == "DST":
+                    return "DST" in positions or "DEF" in positions
+                elif slot == "FLEX":
+                    return any(p in positions for p in ["RB", "WR", "TE"])
+                return False
+            
+            eligible = available[available["positions"].apply(is_eligible)]
+            
+            if eligible.empty:
+                st.error(f"❌ No eligible players for {slot}")
+                st.error(f"Available positions: {available['positions'].tolist()}")
+                break
+            
+            # For specific positions, pick least flexible first
+            if slot not in ["FLEX"]:
+                eligible = eligible.copy()
+                eligible["flexibility"] = eligible["positions"].apply(
+                    lambda x: len(str(x).split("/")) if pd.notna(x) else 0
+                )
+                eligible = eligible.sort_values("flexibility")
+            
+            # Assign first eligible player
+            chosen = eligible.iloc[0]
+            assignments[chosen["player_id"]] = slot
+            assigned.add(chosen["player_id"])
     
-    for slot in slots:
-        available = lineup_df[~lineup_df["player_id"].isin(assigned)]
-        eligible = available[
-            available["positions"].apply(lambda x: can_fill_position(x, slot, sport))
-        ]
+    elif sport == Sport.NBA:
+        # NBA order: C, PG, SG, SF, PF, G, F, UTIL
+        slot_order = ["C", "PG", "SG", "SF", "PF", "G", "F", "UTIL"]
         
-        if eligible.empty:
-            continue
+        for slot in slot_order:
+            available = lineup_df[~lineup_df["player_id"].isin(assigned)]
+            eligible = available[
+                available["positions"].apply(lambda x: can_fill_position(x, slot, sport))
+            ]
+            
+            if eligible.empty:
+                continue
+            
+            # Pick least flexible for specific positions
+            if slot not in ["G", "F", "UTIL"]:
+                eligible = eligible.copy()
+                eligible["flexibility"] = eligible["positions"].apply(
+                    lambda x: len(str(x).split("/")) if pd.notna(x) else 0
+                )
+                eligible = eligible.sort_values("flexibility")
+            
+            chosen = eligible.iloc[0]
+            assignments[chosen["player_id"]] = slot
+            assigned.add(chosen["player_id"])
+    
+    else:
+        # Other sports
+        slots = list(config.primary_positions) + config.flex_positions
         
-        # Pick least flexible player for specific positions
-        if slot not in config.flex_positions:
-            eligible = eligible.copy()
-            eligible["flexibility"] = eligible["positions"].apply(
-                lambda x: len(str(x).split("/"))
-            )
-            eligible = eligible.sort_values("flexibility")
-        
-        chosen = eligible.iloc[0]
-        assignments[chosen["player_id"]] = slot
-        assigned.add(chosen["player_id"])
+        for slot in slots:
+            available = lineup_df[~lineup_df["player_id"].isin(assigned)]
+            eligible = available[
+                available["positions"].apply(lambda x: can_fill_position(x, slot, sport))
+            ]
+            
+            if eligible.empty:
+                continue
+            
+            if slot not in config.flex_positions:
+                eligible = eligible.copy()
+                eligible["flexibility"] = eligible["positions"].apply(
+                    lambda x: len(str(x).split("/")) if pd.notna(x) else 0
+                )
+                eligible = eligible.sort_values("flexibility")
+            
+            chosen = eligible.iloc[0]
+            assignments[chosen["player_id"]] = slot
+            assigned.add(chosen["player_id"])
     
     result = lineup_df.copy()
     result["slot"] = result["player_id"].map(assignments)
+    
+    # Fill any unassigned with "ERROR"
+    result["slot"] = result["slot"].fillna("ERROR")
+    
     return result
 
 
@@ -839,6 +919,13 @@ def main():
         height=400
     )
     
+    # CRITICAL: Merge player_id back from pool
+    edited = edited.merge(
+        pool[["name", "positions", "team", "player_id"]].drop_duplicates(),
+        on=["name", "positions", "team"],
+        how="left"
+    )
+    
     # Get locks and excludes
     locks = edited[edited["lock"] == True]["player_id"].tolist() if "player_id" in edited.columns else []
     excludes = edited[edited["exclude"] == True]["player_id"].tolist() if "player_id" in edited.columns else []
@@ -918,6 +1005,40 @@ def main():
         chosen = lineups[idx]
         lineup_df = pool[pool["player_id"].isin(chosen["player_ids"])]
         lineup_df = assign_positions(lineup_df, sport)
+        
+        # Validate position counts for NFL
+        if sport == Sport.NFL:
+            slot_counts = lineup_df["slot"].value_counts()
+            
+            st.caption("Position Breakdown:")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("QB", slot_counts.get("QB", 0), delta="Need 1", delta_color="off" if slot_counts.get("QB", 0) == 1 else "inverse")
+            with col2:
+                st.metric("RB", slot_counts.get("RB", 0), delta="Need 2", delta_color="off" if slot_counts.get("RB", 0) == 2 else "inverse")
+            with col3:
+                st.metric("WR", slot_counts.get("WR", 0), delta="Need 3", delta_color="off" if slot_counts.get("WR", 0) == 3 else "inverse")
+            with col4:
+                st.metric("TE", slot_counts.get("TE", 0), delta="Need 1", delta_color="off" if slot_counts.get("TE", 0) == 1 else "inverse")
+            
+            col5, col6 = st.columns(2)
+            with col5:
+                st.metric("FLEX", slot_counts.get("FLEX", 0), delta="Need 1", delta_color="off" if slot_counts.get("FLEX", 0) == 1 else "inverse")
+            with col6:
+                st.metric("DST", slot_counts.get("DST", 0), delta="Need 1", delta_color="off" if slot_counts.get("DST", 0) == 1 else "inverse")
+            
+            # Check if valid
+            is_valid = (
+                slot_counts.get("QB", 0) == 1 and
+                slot_counts.get("RB", 0) == 2 and
+                slot_counts.get("WR", 0) == 3 and
+                slot_counts.get("TE", 0) == 1 and
+                slot_counts.get("FLEX", 0) == 1 and
+                slot_counts.get("DST", 0) == 1
+            )
+            
+            if not is_valid:
+                st.error("⚠️ This lineup has invalid position assignments! Regenerating may help.")
         
         st.dataframe(
             lineup_df[[
