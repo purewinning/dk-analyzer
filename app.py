@@ -96,6 +96,232 @@ def detect_sport(df: pd.DataFrame) -> str:
         return "NBA"  # Default
 
 
+def fetch_vegas_data(sport: str = "NBA") -> Dict[str, Dict[str, Any]]:
+    """
+    Fetch Vegas totals and spreads from The Odds API.
+    Returns dict keyed by GameID with total and spread.
+    """
+    try:
+        import requests
+    except ImportError:
+        st.warning("⚠️ 'requests' library not installed. Run: pip install requests")
+        return {}
+    
+    # API key - store in Streamlit secrets or use directly
+    api_key = st.secrets.get("ODDS_API_KEY", "YOUR_KEY_HERE")
+    
+    # Allow manual override for testing
+    if api_key == "YOUR_KEY_HERE":
+        # You can paste your API key here for testing
+        api_key = None  # Replace with your actual key or use secrets
+    
+    if not api_key:
+        return {}  # No API key, return empty
+    
+    # Map sport names to API keys
+    sport_mapping = {
+        "NBA": "basketball_nba",
+        "NFL": "americanfootball_nfl",
+        "NCAAB": "basketball_ncaab",
+        "NCAAF": "americanfootball_ncaaf"
+    }
+    
+    sport_key = sport_mapping.get(sport, "basketball_nba")
+    
+    # The Odds API endpoint
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+    
+    params = {
+        "apiKey": api_key,
+        "regions": "us",
+        "markets": "totals,spreads",  # Request both totals and spreads
+        "oddsFormat": "american",
+        "bookmakers": "fanduel,draftkings"  # Use major books
+    }
+    
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Show remaining API calls
+        remaining = response.headers.get("x-requests-remaining")
+        if remaining:
+            st.sidebar.caption(f"📊 API calls remaining: {remaining}")
+        
+        vegas_dict = {}
+        
+        for game in data:
+            home_team = game.get("home_team", "")
+            away_team = game.get("away_team", "")
+            
+            # Convert full names to abbreviations
+            home_abbr = convert_team_name(home_team, sport)
+            away_abbr = convert_team_name(away_team, sport)
+            
+            # Create GameID (sorted alphabetically)
+            game_id = "@".join(sorted([home_abbr, away_abbr]))
+            
+            # Extract totals and spreads from bookmakers
+            total = None
+            spread = None
+            favorite = None
+            
+            for bookmaker in game.get("bookmakers", []):
+                for market in bookmaker.get("markets", []):
+                    if market["key"] == "totals" and total is None:
+                        # Get the over/under point
+                        outcomes = market.get("outcomes", [])
+                        if outcomes:
+                            total = outcomes[0].get("point")
+                    
+                    if market["key"] == "spreads" and spread is None:
+                        # Get the spread (negative = favorite)
+                        outcomes = market.get("outcomes", [])
+                        for outcome in outcomes:
+                            point = outcome.get("point")
+                            if point and point < 0:
+                                spread = point
+                                favorite = convert_team_name(outcome["name"], sport)
+                                break
+            
+            if total or spread:
+                vegas_dict[game_id] = {
+                    "total": total,
+                    "spread": spread,
+                    "favorite": favorite,
+                    "home": home_abbr,
+                    "away": away_abbr
+                }
+        
+        if vegas_dict:
+            st.sidebar.success(f"✅ Fetched Vegas lines for {len(vegas_dict)} games")
+        
+        return vegas_dict
+        
+    except requests.exceptions.RequestException as e:
+        st.sidebar.warning(f"⚠️ Could not fetch Vegas data: {str(e)[:100]}")
+        return {}
+    except Exception as e:
+        st.sidebar.warning(f"⚠️ Error processing Vegas data: {str(e)[:100]}")
+        return {}
+
+
+def convert_team_name(full_name: str, sport: str = "NBA") -> str:
+    """
+    Convert full team name to 3-letter abbreviation.
+    """
+    # NBA team mappings
+    nba_teams = {
+        "Atlanta Hawks": "ATL",
+        "Boston Celtics": "BOS",
+        "Brooklyn Nets": "BKN",
+        "Charlotte Hornets": "CHA",
+        "Chicago Bulls": "CHI",
+        "Cleveland Cavaliers": "CLE",
+        "Dallas Mavericks": "DAL",
+        "Denver Nuggets": "DEN",
+        "Detroit Pistons": "DET",
+        "Golden State Warriors": "GSW",
+        "Houston Rockets": "HOU",
+        "Indiana Pacers": "IND",
+        "Los Angeles Clippers": "LAC",
+        "Los Angeles Lakers": "LAL",
+        "Memphis Grizzlies": "MEM",
+        "Miami Heat": "MIA",
+        "Milwaukee Bucks": "MIL",
+        "Minnesota Timberwolves": "MIN",
+        "New Orleans Pelicans": "NOP",
+        "New York Knicks": "NYK",
+        "Oklahoma City Thunder": "OKC",
+        "Orlando Magic": "ORL",
+        "Philadelphia 76ers": "PHI",
+        "Phoenix Suns": "PHX",
+        "Portland Trail Blazers": "POR",
+        "Sacramento Kings": "SAC",
+        "San Antonio Spurs": "SAS",
+        "Toronto Raptors": "TOR",
+        "Utah Jazz": "UTA",
+        "Washington Wizards": "WAS",
+    }
+    
+    # NFL team mappings
+    nfl_teams = {
+        "Arizona Cardinals": "ARI",
+        "Atlanta Falcons": "ATL",
+        "Baltimore Ravens": "BAL",
+        "Buffalo Bills": "BUF",
+        "Carolina Panthers": "CAR",
+        "Chicago Bears": "CHI",
+        "Cincinnati Bengals": "CIN",
+        "Cleveland Browns": "CLE",
+        "Dallas Cowboys": "DAL",
+        "Denver Broncos": "DEN",
+        "Detroit Lions": "DET",
+        "Green Bay Packers": "GB",
+        "Houston Texans": "HOU",
+        "Indianapolis Colts": "IND",
+        "Jacksonville Jaguars": "JAX",
+        "Kansas City Chiefs": "KC",
+        "Las Vegas Raiders": "LV",
+        "Los Angeles Chargers": "LAC",
+        "Los Angeles Rams": "LAR",
+        "Miami Dolphins": "MIA",
+        "Minnesota Vikings": "MIN",
+        "New England Patriots": "NE",
+        "New Orleans Saints": "NO",
+        "New York Giants": "NYG",
+        "New York Jets": "NYJ",
+        "Philadelphia Eagles": "PHI",
+        "Pittsburgh Steelers": "PIT",
+        "San Francisco 49ers": "SF",
+        "Seattle Seahawks": "SEA",
+        "Tampa Bay Buccaneers": "TB",
+        "Tennessee Titans": "TEN",
+        "Washington Commanders": "WAS",
+    }
+    
+    team_map = nba_teams if sport == "NBA" else nfl_teams
+    
+    # Try exact match first
+    if full_name in team_map:
+        return team_map[full_name]
+    
+    # Try case-insensitive match
+    for team, abbr in team_map.items():
+        if team.lower() == full_name.lower():
+            return abbr
+    
+    # Fallback: use first 3 letters of last word
+    words = full_name.split()
+    if words:
+        return words[-1][:3].upper()
+    
+    return full_name[:3].upper()
+
+
+def enrich_with_vegas_data(df: pd.DataFrame, sport: str = "NBA") -> pd.DataFrame:
+    """
+    Add Vegas total and spread to dataframe based on GameID.
+    """
+    if df.empty or "GameID" not in df.columns:
+        return df
+    
+    vegas_data = fetch_vegas_data(sport)
+    
+    if not vegas_data:
+        # No Vegas data available - add empty columns
+        df["vegas_total"] = None
+        df["vegas_spread"] = None
+        return df
+    
+    # Map Vegas data to players
+    df["vegas_total"] = df["GameID"].map(lambda gid: vegas_data.get(gid, {}).get("total"))
+    df["vegas_spread"] = df["GameID"].map(lambda gid: vegas_data.get(gid, {}).get("spread"))
+    
+    return df
+
+
 def calculate_player_leverage(row):
     expected_optimal_pct = (row["value"] / 5.0) * 100
     expected_optimal_pct = min(expected_optimal_pct, 100)
@@ -334,6 +560,10 @@ def load_and_preprocess_data(pasted_data: str = None) -> pd.DataFrame:
     for col in empty_df_cols:
         if col not in df.columns:
             df[col] = None
+    
+    # Enrich with Vegas data (if available)
+    # This will add vegas_total and vegas_spread columns
+    df = enrich_with_vegas_data(df, sport="NBA")  # Will detect sport properly later
 
     return df
 
@@ -1310,6 +1540,8 @@ else:
 
     column_config = {
         "Name": st.column_config.TextColumn("Player", disabled=True),
+        "Team": st.column_config.TextColumn("Team", disabled=True, width="small"),
+        "Opponent": st.column_config.TextColumn("Opp", disabled=True, width="small"),
         "edge_category": st.column_config.TextColumn("Edge", disabled=True),
         "gpp_score": st.column_config.NumberColumn(
             "GPP Score", disabled=True, format="%.1f"
@@ -1327,18 +1559,20 @@ else:
         "own_proj": st.column_config.NumberColumn("Own%", format="%.1f%%"),
         "Lock": st.column_config.CheckboxColumn("🔒"),
         "Exclude": st.column_config.CheckboxColumn("❌"),
-        "Team": None,
-        "Opponent": None,
         "bucket": None,
         "Minutes": None,
         "FPPM": None,
         "player_id": None,
         "GameID": None,
+        "vegas_total": None,
+        "vegas_spread": None,
     }
     column_order = [
         "Lock",
         "Exclude",
         "Name",
+        "Team",
+        "Opponent",
         "edge_category",
         "gpp_score",
         "leverage_score",
