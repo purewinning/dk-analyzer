@@ -1,740 +1,381 @@
 """
-Advanced DFS Lineup Builder with Correlation & NFL Support
-Includes: Game stacks, team stacks, bring-backs, and sport-specific logic
+Elite Multi-Sport DFS Lineup Builder
+Supports: NBA, NFL, MLB, NHL, PGA
+Focus: Contrarian leverage, advanced stacking, tournament upside
 """
 
 import io
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set
 from collections import defaultdict, Counter
+from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import CategoricalDtype
 import streamlit as st
 
 # -------------------------------------------------------------------
-# CONFIG
-# -------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="Advanced DFS Lineup Builder")
-
-DEFAULT_SALARY_CAP = 50000
-DEFAULT_ROSTER_SIZE = 8  # NBA default
-
-# -------------------------------------------------------------------
-# SPORT DETECTION & POSITION RULES
+# CONFIGURATION
 # -------------------------------------------------------------------
 
-def detect_sport(df: pd.DataFrame) -> str:
+st.set_page_config(
+    page_title="Elite DFS Builder",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+class Sport(Enum):
+    """Supported sports with their characteristics."""
+    NBA = "NBA"
+    NFL = "NFL"
+    MLB = "MLB"
+    NHL = "NHL"
+    PGA = "PGA"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass
+class SportConfig:
+    """Sport-specific configuration."""
+    name: str
+    roster_size: int
+    salary_cap: int
+    positions: Dict[str, int]
+    flex_positions: List[str]
+    primary_positions: List[str]
+    
+    
+SPORT_CONFIGS = {
+    Sport.NBA: SportConfig(
+        name="NBA",
+        roster_size=8,
+        salary_cap=50000,
+        positions={"PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1, "G": 1, "F": 1, "UTIL": 1},
+        flex_positions=["G", "F", "UTIL"],
+        primary_positions=["PG", "SG", "SF", "PF", "C"]
+    ),
+    Sport.NFL: SportConfig(
+        name="NFL",
+        roster_size=9,
+        salary_cap=50000,
+        positions={"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1, "DST": 1},
+        flex_positions=["FLEX"],
+        primary_positions=["QB", "RB", "WR", "TE", "DST"]
+    ),
+    Sport.MLB: SportConfig(
+        name="MLB",
+        roster_size=10,
+        salary_cap=50000,
+        positions={"P": 2, "C": 1, "1B": 1, "2B": 1, "3B": 1, "SS": 1, "OF": 3},
+        flex_positions=[],
+        primary_positions=["P", "C", "1B", "2B", "3B", "SS", "OF"]
+    ),
+    Sport.NHL: SportConfig(
+        name="NHL",
+        roster_size=9,
+        salary_cap=50000,
+        positions={"C": 2, "W": 3, "D": 2, "G": 2, "UTIL": 1},
+        flex_positions=["UTIL"],
+        primary_positions=["C", "W", "D", "G"]
+    ),
+}
+
+# -------------------------------------------------------------------
+# SPORT DETECTION
+# -------------------------------------------------------------------
+
+def detect_sport_from_positions(df: pd.DataFrame) -> Sport:
     """Detect sport from position data."""
     if df.empty or "positions" not in df.columns:
-        return "NBA"
+        return Sport.UNKNOWN
     
+    # Get all unique positions
     all_positions = set()
-    for val in df["positions"]:
-        if isinstance(val, str):
-            for p in val.replace(" ", "").split("/"):
-                all_positions.add(p.upper())
+    for val in df["positions"].dropna():
+        for pos in str(val).upper().replace(" ", "").split("/"):
+            all_positions.add(pos.strip())
     
-    nfl_positions = {"QB", "RB", "WR", "TE", "DST", "DEF", "FLEX"}
-    nba_positions = {"PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"}
+    # Sport signatures
+    if {"QB", "RB", "WR", "TE"} & all_positions:
+        return Sport.NFL
+    if {"PG", "SG", "SF", "PF", "C"} & all_positions:
+        return Sport.NBA
+    if {"P", "1B", "2B", "3B", "SS", "OF"} & all_positions:
+        return Sport.MLB
+    if {"C", "W", "D", "G", "LW", "RW"} & all_positions:
+        return Sport.NHL
     
-    if all_positions & nfl_positions:
-        return "NFL"
-    if all_positions & nba_positions:
-        return "NBA"
-    return "NBA"
+    return Sport.UNKNOWN
 
-
-def get_position_rules(sport: str) -> Dict[str, Any]:
-    """Get position requirements and roster size for sport."""
-    if sport == "NFL":
-        return {
-            "roster_size": 9,
-            "positions": {
-                "QB": 1,
-                "RB": 2,
-                "WR": 3,
-                "TE": 1,
-                "FLEX": 1,  # RB/WR/TE
-                "DST": 1
-            },
-            "flex_positions": ["RB", "WR", "TE"],
-            "salary_cap": 50000
-        }
-    else:  # NBA
-        return {
-            "roster_size": 8,
-            "positions": {
-                "PG": 1,
-                "SG": 1,
-                "SF": 1,
-                "PF": 1,
-                "C": 1,
-                "G": 1,   # PG/SG
-                "F": 1,   # SF/PF
-                "UTIL": 1  # Any
-            },
-            "salary_cap": 50000
-        }
 
 # -------------------------------------------------------------------
-# OWNERSHIP & METRICS
+# DATA NORMALIZATION
 # -------------------------------------------------------------------
 
-def ownership_bucket(own: float) -> str:
-    """Map ownership to bucket."""
-    if pd.isna(own):
-        return "mid"
-    if own >= 40:
-        return "mega"
-    if own >= 30:
-        return "chalk"
-    if own >= 10:
-        return "mid"
-    return "punt"
-
-
-def calculate_leverage(row: pd.Series) -> float:
-    """Calculate leverage score."""
-    expected_optimal = (row["value"] / 5.0) * 100
-    expected_optimal = min(expected_optimal, 100)
-    leverage = expected_optimal - row["own_proj"]
-    return round(leverage, 1)
-
-
-def calculate_ceiling(row: pd.Series, sport: str) -> float:
-    """Calculate ceiling projection."""
-    if sport == "NFL":
-        # NFL has more variance, especially for QBs
-        if "QB" in str(row.get("positions", "")):
-            mult = 1.5
-        elif "RB" in str(row.get("positions", "")):
-            mult = 1.4
-        else:
-            mult = 1.35
-    else:
-        mult = 1.35
-    
-    return round(row["proj"] * mult, 1)
-
-# -------------------------------------------------------------------
-# CSV NORMALIZATION
-# -------------------------------------------------------------------
-
-def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize CSV into internal schema."""
+def normalize_csv_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize any DFS CSV into standard format."""
     df = df.copy()
+    
+    # Normalize column names
     df.columns = df.columns.str.strip().str.lower()
     
-    rename_map = {
-        "player": "Name",
-        "name": "Name",
-        "salary": "Salary",
+    # Standard column mapping
+    column_map = {
+        "player": "name",
+        "name": "name",
+        "salary": "salary",
+        "sal": "salary",
         "position": "positions",
         "pos": "positions",
-        "team": "Team",
-        "tm": "Team",
-        "opponent": "Opponent",
-        "opp": "Opponent",
+        "team": "team",
+        "tm": "team",
+        "opponent": "opp",
+        "opp": "opp",
+        "opp_team": "opp",
         "projection": "proj",
         "proj": "proj",
         "fpts": "proj",
         "points": "proj",
-        "value": "Value",
-        "ownership": "own_proj",
-        "ownership%": "own_proj",
-        "ownership %": "own_proj",
-        "own": "own_proj",
-        "own%": "own_proj",
+        "ownership": "own",
+        "ownership%": "own",
+        "own": "own",
+        "own%": "own",
+        "own_proj": "own",
     }
-    df = df.rename(columns=rename_map)
     
-    required = ["Name", "Team", "positions", "Salary", "proj"]
+    df = df.rename(columns=column_map)
+    
+    # Required columns
+    required = ["name", "salary", "positions", "proj"]
     missing = [c for c in required if c not in df.columns]
+    
     if missing:
         st.error(f"❌ Missing required columns: {missing}")
+        st.error(f"Found columns: {list(df.columns)}")
         return pd.DataFrame()
     
-    # Clean Salary
-    if "Salary" in df.columns:
-        df["Salary"] = (
-            df["Salary"].astype(str)
-            .str.replace(r"[\$,]", "", regex=True)
-            .str.strip()
-        )
+    # Clean salary
+    df["salary"] = (
+        df["salary"].astype(str)
+        .str.replace(r"[\$,]", "", regex=True)
+        .str.strip()
+    )
+    df["salary"] = pd.to_numeric(df["salary"], errors="coerce")
     
     # Clean ownership
-    if "own_proj" in df.columns:
-        df["own_proj"] = (
-            df["own_proj"].astype(str)
+    if "own" in df.columns:
+        df["own"] = (
+            df["own"].astype(str)
             .str.replace("%", "", regex=False)
             .str.strip()
         )
+        df["own"] = pd.to_numeric(df["own"], errors="coerce")
     else:
-        df["own_proj"] = 15.0
+        df["own"] = 15.0  # Default
     
-    # Create player_id
+    # Clean numeric columns
+    df["proj"] = pd.to_numeric(df["proj"], errors="coerce")
+    
+    # Drop invalid rows
+    df = df.dropna(subset=["salary", "proj"])
+    df = df[df["salary"] > 0]
+    df = df[df["proj"] > 0]
+    
+    # Create unique ID
     df["player_id"] = (
-        df["Name"].astype(str) + "_" + 
-        df["Team"].astype(str) + "_" + 
-        df["Salary"].astype(str)
+        df["name"].astype(str) + "_" +
+        df["team"].fillna("").astype(str) + "_" +
+        df["salary"].astype(str)
     )
     
-    # Numeric conversions
-    df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
-    df["proj"] = pd.to_numeric(df["proj"], errors="coerce")
-    df["own_proj"] = pd.to_numeric(df["own_proj"], errors="coerce").fillna(15.0)
+    # Ensure team/opp exist
+    if "team" not in df.columns:
+        df["team"] = ""
+    if "opp" not in df.columns:
+        df["opp"] = ""
     
-    df = df.dropna(subset=["Salary", "proj"])
-    
-    # Create GameID
-    if "Opponent" in df.columns:
-        df["GameID"] = df.apply(
-            lambda row: "@".join(sorted([str(row["Team"]), str(row["Opponent"])])),
-            axis=1
-        )
-    else:
-        df["GameID"] = ""
+    # Create game ID
+    df["game_id"] = df.apply(
+        lambda row: "@".join(sorted([str(row["team"]), str(row["opp"])])) 
+        if row["team"] and row["opp"] else "",
+        axis=1
+    )
     
     return df
 
 
-def add_metrics(df: pd.DataFrame, sport: str) -> pd.DataFrame:
-    """Add calculated metrics."""
+def calculate_metrics(df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
+    """Calculate advanced metrics."""
+    df = df.copy()
+    
+    # Value (points per $1K)
     df["value"] = np.where(
-        df["Salary"] > 0,
-        (df["proj"] / (df["Salary"] / 1000)).round(2),
+        df["salary"] > 0,
+        (df["proj"] / (df["salary"] / 1000)).round(2),
         0.0
     )
     
-    df["own_bucket"] = df["own_proj"].apply(ownership_bucket)
-    df["leverage"] = df.apply(calculate_leverage, axis=1)
-    df["ceiling"] = df.apply(lambda row: calculate_ceiling(row, sport), axis=1)
+    # Leverage (expected optimal% - actual own%)
+    df["expected_optimal"] = (df["value"] / 5.0 * 100).clip(0, 100)
+    df["leverage"] = (df["expected_optimal"] - df["own"]).round(1)
+    
+    # Ceiling (sport-specific multipliers)
+    if sport == Sport.NFL:
+        # QB/RB have higher variance
+        df["ceiling_mult"] = df["positions"].apply(
+            lambda x: 1.6 if "QB" in str(x) else 1.5 if "RB" in str(x) else 1.4
+        )
+    else:
+        df["ceiling_mult"] = 1.4
+    
+    df["ceiling"] = (df["proj"] * df["ceiling_mult"]).round(1)
+    
+    # Floor (70% of projection)
+    df["floor"] = (df["proj"] * 0.7).round(1)
+    
+    # Ownership tier
+    def own_tier(own):
+        if pd.isna(own):
+            return "mid"
+        if own >= 40:
+            return "mega-chalk"
+        if own >= 30:
+            return "chalk"
+        if own >= 15:
+            return "mid"
+        if own >= 8:
+            return "contrarian"
+        return "super-contrarian"
+    
+    df["own_tier"] = df["own"].apply(own_tier)
+    
+    # GPP score (weighted composite for tournament play)
+    df["gpp_score"] = (
+        df["ceiling"] * 0.4 +        # Ceiling matters most
+        df["value"] * 10 * 0.3 +      # Value is important
+        df["leverage"] * 0.2 +        # Leverage bonus
+        (100 - df["own"]) * 0.1       # Ownership fade
+    ).round(1)
     
     return df
 
-# -------------------------------------------------------------------
-# GAME ENVIRONMENTS
-# -------------------------------------------------------------------
-
-def build_game_environments(df: pd.DataFrame, sport: str) -> Dict[str, Dict[str, Any]]:
-    """Build game environment dictionary."""
-    if "Team" not in df.columns or "Opponent" not in df.columns:
-        return {}
-    
-    game_envs = {}
-    
-    for game_id, grp in df.groupby("GameID"):
-        if not game_id:
-            continue
-        
-        teams = sorted(grp["Team"].unique())
-        if len(teams) < 2:
-            continue
-        
-        team1, team2 = teams[0], teams[1]
-        
-        team1_proj = grp[grp["Team"] == team1]["proj"].sum()
-        team2_proj = grp[grp["Team"] == team2]["proj"].sum()
-        total_proj = team1_proj + team2_proj
-        
-        # Quality score for game
-        avg_ceiling = grp["ceiling"].mean()
-        quality_score = (total_proj * 0.7) + (avg_ceiling * 0.3)
-        
-        game_envs[game_id] = {
-            "game_id": game_id,
-            "teams": [team1, team2],
-            "total_proj": float(total_proj),
-            "avg_ceiling": float(avg_ceiling),
-            "quality_score": float(quality_score),
-            "team1": team1,
-            "team2": team2,
-            "team1_proj": float(team1_proj),
-            "team2_proj": float(team2_proj),
-        }
-    
-    return game_envs
 
 # -------------------------------------------------------------------
-# NBA STACKING LOGIC
+# STACKING LOGIC (SPORT-SPECIFIC)
 # -------------------------------------------------------------------
 
-def build_nba_team_stacks(df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
-    """Build NBA team stacks (star + value combos)."""
-    team_stacks = {}
+def build_nba_stacks(df: pd.DataFrame) -> Dict[str, List[Dict]]:
+    """Build NBA game and team stacks."""
+    stacks = defaultdict(list)
     
-    for team in df["Team"].unique():
-        team_players = df[df["Team"] == team].copy()
-        
-        if len(team_players) < 2:
+    # Game stacks (multiple players from high-scoring games)
+    for game_id, game_df in df.groupby("game_id"):
+        if not game_id or len(game_df) < 2:
             continue
         
-        # Stars (top 30% salary)
-        salary_threshold = team_players["Salary"].quantile(0.7)
-        stars = team_players[team_players["Salary"] >= salary_threshold]
-        secondary = team_players[team_players["Salary"] < salary_threshold]
+        total_proj = game_df["proj"].sum()
+        avg_ceiling = game_df["ceiling"].mean()
         
-        stacks = []
-        for _, star in stars.iterrows():
-            for _, sec in secondary.iterrows():
-                combined_own = star["own_proj"] + sec["own_proj"]
-                combined_ceiling = star["ceiling"] + sec["ceiling"]
-                combined_proj = star["proj"] + sec["proj"]
+        if total_proj < 200:  # Skip low-scoring games
+            continue
+        
+        # Find stack combinations
+        for i, p1 in game_df.iterrows():
+            for j, p2 in game_df.iterrows():
+                if i >= j:
+                    continue
                 
-                # Stack score
+                # Prefer different teams (bring-back)
+                same_team = p1["team"] == p2["team"]
+                
                 stack_score = (
-                    combined_ceiling * 0.4 +
-                    combined_proj * 0.3 +
-                    (100 - combined_own) * 0.3
+                    (p1["ceiling"] + p2["ceiling"]) * 0.4 +
+                    (p1["value"] + p2["value"]) * 5 * 0.3 +
+                    (200 - p1["own"] - p2["own"]) * 0.2 +
+                    (0 if same_team else 20)  # Bonus for bring-back
                 )
                 
-                stacks.append({
-                    "team": team,
-                    "primary": star["player_id"],
-                    "secondary": sec["player_id"],
-                    "primary_name": star["Name"],
-                    "secondary_name": sec["Name"],
-                    "combined_own": combined_own,
-                    "combined_ceiling": combined_ceiling,
-                    "stack_score": stack_score
+                stacks[game_id].append({
+                    "type": "game_stack",
+                    "players": [p1["player_id"], p2["player_id"]],
+                    "score": stack_score,
+                    "game_id": game_id
                 })
+    
+    # Sort each game's stacks
+    for game_id in stacks:
+        stacks[game_id] = sorted(stacks[game_id], key=lambda x: x["score"], reverse=True)[:10]
+    
+    return dict(stacks)
+
+
+def build_nfl_stacks(df: pd.DataFrame) -> Dict[str, List[Dict]]:
+    """Build NFL QB stacks and bring-backs."""
+    stacks = defaultdict(list)
+    
+    # QB + Pass catcher stacks
+    qbs = df[df["positions"].str.contains("QB", case=False, na=False)]
+    
+    for _, qb in qbs.iterrows():
+        team = qb["team"]
         
-        if stacks:
-            team_stacks[team] = sorted(stacks, key=lambda x: x["stack_score"], reverse=True)[:15]
-    
-    return team_stacks
-
-
-def calculate_nba_correlation_score(lineup_df: pd.DataFrame, game_envs: Dict) -> float:
-    """Calculate NBA correlation score."""
-    if lineup_df.empty:
-        return 0.0
-    
-    score = 0.0
-    
-    # Game stack bonus
-    game_counts = Counter(lineup_df["GameID"].tolist())
-    for game_id, count in game_counts.items():
-        if count > 1 and game_id in game_envs:
-            quality = game_envs[game_id]["quality_score"]
-            score += (count - 1) * quality * 0.1
-    
-    # Team stack bonus
-    team_counts = Counter(lineup_df["Team"].tolist())
-    for team, count in team_counts.items():
-        if count > 1:
-            score += min(count - 1, 3) * 15
-    
-    return float(score)
-
-# -------------------------------------------------------------------
-# NFL STACKING LOGIC
-# -------------------------------------------------------------------
-
-def build_nfl_qb_stacks(df: pd.DataFrame) -> Dict[str, List[Dict[str, Any]]]:
-    """Build NFL QB + pass catcher stacks."""
-    qb_stacks = {}
-    
-    for team in df["Team"].unique():
-        team_players = df[df["Team"] == team].copy()
-        
-        qbs = team_players[team_players["positions"].str.contains("QB", case=False, na=False)]
-        pass_catchers = team_players[
-            team_players["positions"].str.contains("WR|TE", case=False, na=False)
+        # Find pass catchers on same team
+        pass_catchers = df[
+            (df["team"] == team) &
+            (df["positions"].str.contains("WR|TE", case=False, na=False))
         ]
         
-        if qbs.empty or pass_catchers.empty:
-            continue
-        
-        stacks = []
-        for _, qb in qbs.iterrows():
-            for _, pc in pass_catchers.iterrows():
-                combined_own = qb["own_proj"] + pc["own_proj"]
-                combined_ceiling = qb["ceiling"] + pc["ceiling"]
-                combined_proj = qb["proj"] + pc["proj"]
-                
+        for _, pc in pass_catchers.iterrows():
+            # Find bring-back from opposing team
+            opp_team = qb["opp"]
+            bring_backs = df[
+                (df["team"] == opp_team) &
+                (df["positions"].str.contains("QB|WR|TE", case=False, na=False))
+            ].nlargest(3, "ceiling")
+            
+            for _, bb in bring_backs.iterrows():
                 stack_score = (
-                    combined_ceiling * 0.4 +
-                    combined_proj * 0.3 +
-                    (100 - combined_own) * 0.3
+                    (qb["ceiling"] + pc["ceiling"] + bb["ceiling"]) * 0.4 +
+                    (qb["value"] + pc["value"] + bb["value"]) * 5 * 0.3 +
+                    (300 - qb["own"] - pc["own"] - bb["own"]) * 0.3
                 )
                 
-                stacks.append({
-                    "team": team,
-                    "qb": qb["player_id"],
-                    "pass_catcher": pc["player_id"],
-                    "qb_name": qb["Name"],
-                    "pc_name": pc["Name"],
-                    "combined_own": combined_own,
-                    "combined_ceiling": combined_ceiling,
-                    "stack_score": stack_score
+                stacks[team].append({
+                    "type": "qb_stack",
+                    "players": [qb["player_id"], pc["player_id"], bb["player_id"]],
+                    "score": stack_score,
+                    "game_id": qb["game_id"]
                 })
-        
-        if stacks:
-            qb_stacks[team] = sorted(stacks, key=lambda x: x["stack_score"], reverse=True)[:10]
     
-    return qb_stacks
+    # Sort
+    for team in stacks:
+        stacks[team] = sorted(stacks[team], key=lambda x: x["score"], reverse=True)[:10]
+    
+    return dict(stacks)
 
 
-def validate_nfl_lineup(lineup_df: pd.DataFrame) -> bool:
-    """Check for bad NFL correlations."""
-    # QB vs opposing DST
-    qbs = lineup_df[lineup_df["positions"].str.contains("QB", case=False, na=False)]
-    dsts = lineup_df[lineup_df["positions"].str.contains("DST|DEF", case=False, na=False)]
-    
-    for _, qb in qbs.iterrows():
-        qb_opp = qb.get("Opponent", "")
-        for _, dst in dsts.iterrows():
-            dst_team = dst.get("Team", "")
-            if qb_opp == dst_team:
-                return False  # QB facing his own DST
-    
-    # WR/TE vs opposing DST
-    pass_catchers = lineup_df[
-        lineup_df["positions"].str.contains("WR|TE", case=False, na=False)
-    ]
-    
-    for _, pc in pass_catchers.iterrows():
-        pc_opp = pc.get("Opponent", "")
-        for _, dst in dsts.iterrows():
-            dst_team = dst.get("Team", "")
-            if pc_opp == dst_team:
-                return False
-    
-    return True
-
-
-def calculate_nfl_correlation_score(lineup_df: pd.DataFrame, game_envs: Dict) -> float:
-    """Calculate NFL correlation score."""
-    if lineup_df.empty:
-        return 0.0
-    
-    score = 0.0
-    
-    # QB + pass catcher same team (primary stack)
-    qbs = lineup_df[lineup_df["positions"].str.contains("QB", case=False, na=False)]
-    pass_catchers = lineup_df[
-        lineup_df["positions"].str.contains("WR|TE", case=False, na=False)
-    ]
-    
-    for _, qb in qbs.iterrows():
-        qb_team = qb["Team"]
-        same_team_pc = pass_catchers[pass_catchers["Team"] == qb_team]
-        
-        if len(same_team_pc) >= 1:
-            score += 30
-        if len(same_team_pc) >= 2:
-            score += 20
-        if len(same_team_pc) >= 3:
-            score += 15
-    
-    # RB + DST same team
-    rbs = lineup_df[lineup_df["positions"].str.contains("RB", case=False, na=False)]
-    dsts = lineup_df[lineup_df["positions"].str.contains("DST|DEF", case=False, na=False)]
-    
-    for _, rb in rbs.iterrows():
-        rb_team = rb["Team"]
-        same_team_dst = dsts[dsts["Team"] == rb_team]
-        if len(same_team_dst) > 0:
-            score += 25
-    
-    # Game stack bonus
-    game_counts = Counter(lineup_df["GameID"].tolist())
-    for game_id, count in game_counts.items():
-        if count >= 3 and game_id in game_envs:
-            quality = game_envs[game_id].get("quality_score", 0)
-            score += (count - 2) * quality * 0.08
-    
-    # Bring-back bonus
-    for game_id in lineup_df["GameID"].unique():
-        game_players = lineup_df[lineup_df["GameID"] == game_id]
-        teams_in_game = game_players["Team"].nunique()
-        if teams_in_game == 2:
-            score += 15
-    
-    return float(score)
-
-# -------------------------------------------------------------------
-# LINEUP GENERATION
-# -------------------------------------------------------------------
-
-def validate_lineup_positions(lineup_df: pd.DataFrame, sport: str) -> bool:
-    """Validate that lineup can fill all required positions."""
-    if sport == "NBA":
-        required = {
-            "PG": 1, "SG": 1, "SF": 1, "PF": 1, "C": 1,
-            "G": 1, "F": 1, "UTIL": 1
-        }
-        
-        # Count how many players can fill each slot
-        for slot, needed in required.items():
-            eligible_count = 0
-            for _, row in lineup_df.iterrows():
-                pos_string = str(row.get("positions", ""))
-                positions = [p.strip() for p in pos_string.split("/")]
-                
-                if slot in ["PG", "SG", "SF", "PF", "C"]:
-                    if slot in positions:
-                        eligible_count += 1
-                elif slot == "G":
-                    if "PG" in positions or "SG" in positions:
-                        eligible_count += 1
-                elif slot == "F":
-                    if "SF" in positions or "PF" in positions:
-                        eligible_count += 1
-                else:  # UTIL
-                    eligible_count += 1
-            
-            if eligible_count < needed:
-                return False
-        return True
-    
-    elif sport == "NFL":
-        required = {
-            "QB": 1, "RB": 2, "WR": 3, "TE": 1, "DST": 1, "FLEX": 1
-        }
-        
-        position_counts = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "DST": 0}
-        
-        for _, row in lineup_df.iterrows():
-            pos_string = str(row.get("positions", "")).upper()
-            positions = [p.strip() for p in pos_string.split("/")]
-            
-            # Count each position type
-            if "QB" in positions:
-                position_counts["QB"] += 1
-            if "RB" in positions:
-                position_counts["RB"] += 1
-            if "WR" in positions:
-                position_counts["WR"] += 1
-            if "TE" in positions:
-                position_counts["TE"] += 1
-            if "DST" in positions or "DEF" in positions:
-                position_counts["DST"] += 1
-        
-        # Check we have enough of each position
-        if position_counts["QB"] < 1:
-            return False
-        if position_counts["DST"] < 1:
-            return False
-        if position_counts["TE"] < 1:
-            return False
-        
-        # Need at least 2 RBs OR have enough RB+WR+TE to fill RB+WR+FLEX slots
-        total_flex_eligible = position_counts["RB"] + position_counts["WR"] + position_counts["TE"]
-        if total_flex_eligible < 6:  # Need 2 RB + 3 WR + 1 FLEX
-            return False
-        
-        # Must have at least 2 RBs (can't play 1 RB + 1 FLEX-RB)
-        if position_counts["RB"] < 2:
-            return False
-        
-        # Must have at least 3 WRs
-        if position_counts["WR"] < 3:
-            return False
-        
-        return True
-    
-    return True
-
-
-def build_lineup_with_correlation(
-    pool: pd.DataFrame,
-    sport: str,
-    roster_size: int,
-    salary_cap: int,
-    locked_ids: List[str],
-    excluded_ids: List[str],
-    correlation_strength: float,
-    game_envs: Dict,
-    team_stacks: Dict,
-    rng
-) -> Optional[Dict[str, Any]]:
-    """Build single lineup with correlation logic and position validation."""
-    
-    # Filter pool
-    available = pool[
-        (~pool["player_id"].isin(excluded_ids))
-    ].copy()
-    
-    # Start with locks - ENSURE they're in the lineup
-    current_ids = list(locked_ids)
-    locks_df = available[available["player_id"].isin(current_ids)]
-    lock_salary = int(locks_df["Salary"].sum()) if not locks_df.empty else 0
-    
-    if len(current_ids) > roster_size or lock_salary > salary_cap:
-        return None
-    
-    remaining_spots = roster_size - len(current_ids)
-    remaining_cap = salary_cap - lock_salary
-    
-    # Apply correlation if strength > 0.3
-    if correlation_strength > 0.3 and team_stacks:
-        # Try to add a stack
-        if sport == "NBA":
-            # Pick random team with stacks
-            teams_with_stacks = list(team_stacks.keys())
-            if teams_with_stacks:
-                team = rng.choice(teams_with_stacks)
-                stacks = team_stacks[team]
-                if stacks:
-                    stack = rng.choice(stacks[:5])  # Pick from top 5
-                    
-                    # Add stack players if not already in lineup
-                    for pid in [stack["primary"], stack["secondary"]]:
-                        if pid not in current_ids and remaining_spots > 0:
-                            player = available[available["player_id"] == pid]
-                            if not player.empty:
-                                sal = int(player.iloc[0]["Salary"])
-                                if sal <= remaining_cap:
-                                    current_ids.append(pid)
-                                    remaining_spots -= 1
-                                    remaining_cap -= sal
-        
-        elif sport == "NFL":
-            # Similar for NFL QB stacks
-            teams_with_stacks = list(team_stacks.keys())
-            if teams_with_stacks:
-                team = rng.choice(teams_with_stacks)
-                stacks = team_stacks[team]
-                if stacks:
-                    stack = rng.choice(stacks[:5])
-                    
-                    for pid in [stack["qb"], stack["pass_catcher"]]:
-                        if pid not in current_ids and remaining_spots > 0:
-                            player = available[available["player_id"] == pid]
-                            if not player.empty:
-                                sal = int(player.iloc[0]["Salary"])
-                                if sal <= remaining_cap:
-                                    current_ids.append(pid)
-                                    remaining_spots -= 1
-                                    remaining_cap -= sal
-    
-    # Fill remaining spots with value-based selection
-    available_pool = available[~available["player_id"].isin(current_ids)].copy()
-    
-    if not available_pool.empty and remaining_spots > 0:
-        scores = available_pool["value"].values + rng.normal(0, 0.2, len(available_pool))
-        available_pool = available_pool.assign(_score=scores).sort_values("_score", ascending=False)
-        
-        for _, row in available_pool.iterrows():
-            if remaining_spots == 0:
-                break
-            if row["Salary"] <= remaining_cap:
-                current_ids.append(row["player_id"])
-                remaining_spots -= 1
-                remaining_cap -= int(row["Salary"])
-    
-    if remaining_spots != 0:
-        return None
-    
-    # Validate lineup
-    lineup_df = pool[pool["player_id"].isin(current_ids)]
-    
-    # CRITICAL: Validate position requirements
-    if not validate_lineup_positions(lineup_df, sport):
-        return None
-    
-    if sport == "NFL" and not validate_nfl_lineup(lineup_df):
-        return None
-    
-    # Calculate scores
-    proj_score = float(lineup_df["proj"].sum())
-    salary_used = int(lineup_df["Salary"].sum())
-    total_own = float(lineup_df["own_proj"].sum())
-    
-    if sport == "NBA":
-        corr_score = calculate_nba_correlation_score(lineup_df, game_envs)
+def build_stacks(df: pd.DataFrame, sport: Sport) -> Dict[str, List[Dict]]:
+    """Build sport-specific stacks."""
+    if sport == Sport.NBA:
+        return build_nba_stacks(df)
+    elif sport == Sport.NFL:
+        return build_nfl_stacks(df)
     else:
-        corr_score = calculate_nfl_correlation_score(lineup_df, game_envs)
-    
-    # Composite score
-    composite = (
-        proj_score * (1.0 - correlation_strength * 0.3) +
-        corr_score * 0.5 * correlation_strength
-    )
-    
-    return {
-        "player_ids": current_ids,
-        "proj_score": proj_score,
-        "salary_used": salary_used,
-        "total_own": total_own,
-        "correlation": corr_score,
-        "composite": composite
-    }
+        return {}
 
-
-def generate_lineups_advanced(
-    pool: pd.DataFrame,
-    sport: str,
-    n_lineups: int,
-    roster_size: int,
-    salary_cap: int,
-    locked_ids: List[str],
-    excluded_ids: List[str],
-    correlation_strength: float,
-    max_attempts: int = 5000
-) -> List[Dict[str, Any]]:
-    """Generate lineups with advanced correlation."""
-    
-    # Build environments and stacks
-    game_envs = build_game_environments(pool, sport)
-    
-    if sport == "NBA":
-        team_stacks = build_nba_team_stacks(pool)
-    else:
-        team_stacks = build_nfl_qb_stacks(pool)
-    
-    rng = np.random.default_rng(42)
-    
-    lineups = []
-    seen_sets = set()
-    
-    for _ in range(max_attempts):
-        if len(lineups) >= n_lineups:
-            break
-        
-        lineup = build_lineup_with_correlation(
-            pool=pool,
-            sport=sport,
-            roster_size=roster_size,
-            salary_cap=salary_cap,
-            locked_ids=locked_ids,
-            excluded_ids=excluded_ids,
-            correlation_strength=correlation_strength,
-            game_envs=game_envs,
-            team_stacks=team_stacks,
-            rng=rng
-        )
-        
-        if not lineup:
-            continue
-        
-        key = tuple(sorted(lineup["player_ids"]))
-        if key in seen_sets:
-            continue
-        seen_sets.add(key)
-        
-        lineups.append(lineup)
-    
-    # Sort by composite score
-    lineups = sorted(lineups, key=lambda x: x["composite"], reverse=True)
-    return lineups[:n_lineups]
 
 # -------------------------------------------------------------------
-# POSITION ASSIGNMENT
+# LINEUP VALIDATION
 # -------------------------------------------------------------------
 
-def assign_nba_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
-    """Assign NBA positions."""
-    assigned_players = set()
-    slot_assignments = {}
+def can_fill_position(pos_string: str, slot: str, sport: Sport) -> bool:
+    """Check if player can fill a roster slot."""
+    if pd.isna(pos_string):
+        return False
     
-    def can_play(pos_string, slot):
-        if pd.isna(pos_string):
-            return False
-        positions = [p.strip() for p in str(pos_string).split("/")]
+    positions = [p.strip().upper() for p in str(pos_string).split("/")]
+    
+    if sport == Sport.NBA:
         if slot in ["PG", "SG", "SF", "PF", "C"]:
             return slot in positions
         if slot == "G":
@@ -743,35 +384,7 @@ def assign_nba_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
             return "SF" in positions or "PF" in positions
         return True  # UTIL
     
-    slots = ["C", "PG", "SG", "SF", "PF", "G", "F", "UTIL"]
-    
-    for slot in slots:
-        available = lineup_df[~lineup_df["player_id"].isin(assigned_players)]
-        eligible = available[available["positions"].apply(lambda x: can_play(x, slot))]
-        
-        if eligible.empty:
-            continue
-        
-        chosen = eligible.iloc[0]
-        slot_assignments[slot] = chosen["player_id"]
-        assigned_players.add(chosen["player_id"])
-    
-    result = lineup_df.copy()
-    result["roster_slot"] = result["player_id"].map(
-        {v: k for k, v in slot_assignments.items()}
-    )
-    return result
-
-
-def assign_nfl_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
-    """Assign NFL positions with proper DraftKings validation."""
-    assigned_players = set()
-    slot_assignments = {}
-    
-    def can_play(pos_string, slot):
-        if pd.isna(pos_string):
-            return False
-        positions = [p.strip().upper() for p in str(pos_string).split("/")]
+    elif sport == Sport.NFL:
         if slot in ["QB", "RB", "WR", "TE"]:
             return slot in positions
         if slot == "DST":
@@ -780,375 +393,578 @@ def assign_nfl_positions(lineup_df: pd.DataFrame) -> pd.DataFrame:
             return any(p in positions for p in ["RB", "WR", "TE"])
         return False
     
-    def flexibility(pos_string):
-        """Count how many positions a player can fill."""
-        if pd.isna(pos_string):
-            return 0
-        positions = [p.strip().upper() for p in str(pos_string).split("/")]
-        return len(positions)
+    elif sport == Sport.MLB:
+        if slot == "P":
+            return "P" in positions or "SP" in positions or "RP" in positions
+        return slot in positions
     
-    # Must fill in order: specific positions first, then FLEX
-    slots = ["QB", "DST", "TE", "RB", "RB", "WR", "WR", "WR", "FLEX"]
+    elif sport == Sport.NHL:
+        if slot == "W":
+            return "W" in positions or "LW" in positions or "RW" in positions
+        if slot == "UTIL":
+            return True
+        return slot in positions
+    
+    return False
+
+
+def validate_position_requirements(lineup_df: pd.DataFrame, sport: Sport) -> bool:
+    """Validate lineup meets position requirements."""
+    config = SPORT_CONFIGS.get(sport)
+    if not config:
+        return False
+    
+    position_counts = defaultdict(int)
+    
+    for _, player in lineup_df.iterrows():
+        pos_string = str(player.get("positions", "")).upper()
+        positions = [p.strip() for p in pos_string.split("/")]
+        
+        # Count each position
+        for pos in positions:
+            position_counts[pos] += 1
+    
+    # Check requirements based on sport
+    if sport == Sport.NBA:
+        return all([
+            position_counts.get("PG", 0) >= 1,
+            position_counts.get("SG", 0) >= 1,
+            position_counts.get("SF", 0) >= 1,
+            position_counts.get("PF", 0) >= 1,
+            position_counts.get("C", 0) >= 1,
+        ])
+    
+    elif sport == Sport.NFL:
+        return all([
+            position_counts.get("QB", 0) >= 1,
+            position_counts.get("RB", 0) >= 2,
+            position_counts.get("WR", 0) >= 3,
+            position_counts.get("TE", 0) >= 1,
+            position_counts.get("DST", 0) + position_counts.get("DEF", 0) >= 1,
+        ])
+    
+    return True
+
+
+# -------------------------------------------------------------------
+# LINEUP GENERATION (CONTRARIAN FOCUS)
+# -------------------------------------------------------------------
+
+def generate_contrarian_lineup(
+    pool: pd.DataFrame,
+    sport: Sport,
+    config: SportConfig,
+    locks: List[str],
+    excludes: List[str],
+    stacks: Dict,
+    correlation_strength: float,
+    rng: np.random.Generator
+) -> Optional[Dict[str, Any]]:
+    """
+    Generate single contrarian lineup.
+    
+    Strategy:
+    1. Start with locks
+    2. Apply stacking if correlation > 0.5
+    3. Fill with contrarian + value plays
+    4. Avoid chalk traps
+    """
+    
+    # Start with locks
+    selected = list(locks)
+    selected_df = pool[pool["player_id"].isin(selected)]
+    
+    used_salary = int(selected_df["salary"].sum()) if not selected_df.empty else 0
+    remaining_cap = config.salary_cap - used_salary
+    remaining_spots = config.roster_size - len(selected)
+    
+    if remaining_spots < 0 or used_salary > config.salary_cap:
+        return None
+    
+    # Available pool
+    available = pool[
+        (~pool["player_id"].isin(selected)) &
+        (~pool["player_id"].isin(excludes))
+    ].copy()
+    
+    # Apply stacking if enabled
+    if correlation_strength > 0.5 and stacks and remaining_spots >= 2:
+        # Pick a random stack
+        all_stacks = []
+        for stack_list in stacks.values():
+            all_stacks.extend(stack_list)
+        
+        if all_stacks:
+            # Weight by score
+            stack_scores = np.array([s["score"] for s in all_stacks])
+            stack_scores = np.maximum(stack_scores, 1)  # Avoid zeros
+            probs = stack_scores / stack_scores.sum()
+            
+            chosen_stack = rng.choice(all_stacks, p=probs)
+            
+            # Add stack players
+            for pid in chosen_stack["players"]:
+                if pid not in selected and remaining_spots > 0:
+                    player = available[available["player_id"] == pid]
+                    if not player.empty:
+                        sal = int(player.iloc[0]["salary"])
+                        if sal <= remaining_cap:
+                            selected.append(pid)
+                            remaining_cap -= sal
+                            remaining_spots -= 1
+    
+    # Fill remaining with contrarian + value
+    available = pool[
+        (~pool["player_id"].isin(selected)) &
+        (~pool["player_id"].isin(excludes))
+    ].copy()
+    
+    if remaining_spots > 0 and not available.empty:
+        # Score players: favor low ownership + high value
+        available["selection_score"] = (
+            available["gpp_score"] * 0.6 +
+            (100 - available["own"]) * 0.4 +  # Contrarian bonus
+            rng.normal(0, 10, len(available))  # Randomness
+        )
+        
+        # Avoid mega-chalk
+        available = available[available["own"] < 40]
+        
+        if available.empty:
+            # If too restrictive, allow chalk but penalize
+            available = pool[
+                (~pool["player_id"].isin(selected)) &
+                (~pool["player_id"].isin(excludes))
+            ].copy()
+            available["selection_score"] = available["gpp_score"]
+        
+        available = available.sort_values("selection_score", ascending=False)
+        
+        # Greedy fill
+        for _, player in available.iterrows():
+            if remaining_spots == 0:
+                break
+            if player["salary"] <= remaining_cap:
+                selected.append(player["player_id"])
+                remaining_cap -= int(player["salary"])
+                remaining_spots -= 1
+    
+    if remaining_spots > 0:
+        return None
+    
+    # Validate
+    lineup_df = pool[pool["player_id"].isin(selected)]
+    
+    if not validate_position_requirements(lineup_df, sport):
+        return None
+    
+    # Calculate metrics
+    total_proj = float(lineup_df["proj"].sum())
+    total_salary = int(lineup_df["salary"].sum())
+    total_own = float(lineup_df["own"].sum())
+    avg_leverage = float(lineup_df["leverage"].mean())
+    total_ceiling = float(lineup_df["ceiling"].sum())
+    
+    return {
+        "player_ids": selected,
+        "proj": total_proj,
+        "salary": total_salary,
+        "own": total_own,
+        "leverage": avg_leverage,
+        "ceiling": total_ceiling,
+        "score": total_proj + avg_leverage * 0.5 + (config.roster_size * 100 - total_own) * 0.3
+    }
+
+
+def generate_lineup_set(
+    pool: pd.DataFrame,
+    sport: Sport,
+    n_lineups: int,
+    locks: List[str],
+    excludes: List[str],
+    correlation_strength: float,
+    max_attempts: int = 10000
+) -> List[Dict[str, Any]]:
+    """Generate multiple contrarian lineups."""
+    
+    config = SPORT_CONFIGS[sport]
+    stacks = build_stacks(pool, sport)
+    
+    rng = np.random.default_rng(42)
+    
+    lineups = []
+    seen = set()
+    
+    for _ in range(max_attempts):
+        if len(lineups) >= n_lineups:
+            break
+        
+        lineup = generate_contrarian_lineup(
+            pool, sport, config, locks, excludes,
+            stacks, correlation_strength, rng
+        )
+        
+        if not lineup:
+            continue
+        
+        key = tuple(sorted(lineup["player_ids"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        
+        lineups.append(lineup)
+    
+    # Sort by score
+    lineups = sorted(lineups, key=lambda x: x["score"], reverse=True)
+    return lineups
+
+
+# -------------------------------------------------------------------
+# POSITION ASSIGNMENT
+# -------------------------------------------------------------------
+
+def assign_positions(lineup_df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
+    """Assign optimal positions to lineup."""
+    config = SPORT_CONFIGS[sport]
+    
+    assigned = set()
+    assignments = {}
+    
+    # Get slot order (specific first, flex last)
+    slots = list(config.primary_positions) + config.flex_positions
     
     for slot in slots:
-        available = lineup_df[~lineup_df["player_id"].isin(assigned_players)]
-        if available.empty:
-            break
-            
-        eligible = available[available["positions"].apply(lambda x: can_play(x, slot))]
+        available = lineup_df[~lineup_df["player_id"].isin(assigned)]
+        eligible = available[
+            available["positions"].apply(lambda x: can_fill_position(x, slot, sport))
+        ]
         
         if eligible.empty:
-            # If can't fill this required position, lineup is invalid
-            break
+            continue
         
-        # For specific positions, pick least flexible player first
-        if slot != "FLEX":
+        # Pick least flexible player for specific positions
+        if slot not in config.flex_positions:
             eligible = eligible.copy()
-            eligible["flex"] = eligible["positions"].apply(flexibility)
-            eligible = eligible.sort_values("flex")
+            eligible["flexibility"] = eligible["positions"].apply(
+                lambda x: len(str(x).split("/"))
+            )
+            eligible = eligible.sort_values("flexibility")
         
         chosen = eligible.iloc[0]
-        slot_assignments[chosen["player_id"]] = slot
-        assigned_players.add(chosen["player_id"])
-    
-    # Validate we filled all 9 positions
-    if len(slot_assignments) != 9:
-        # Invalid lineup - mark all as their primary position
-        result = lineup_df.copy()
-        result["roster_slot"] = result["positions"].apply(lambda x: str(x).split("/")[0] if pd.notna(x) else "FLEX")
-        return result
+        assignments[chosen["player_id"]] = slot
+        assigned.add(chosen["player_id"])
     
     result = lineup_df.copy()
-    result["roster_slot"] = result["player_id"].map(slot_assignments)
+    result["slot"] = result["player_id"].map(assignments)
     return result
 
-# -------------------------------------------------------------------
-# UI
-# -------------------------------------------------------------------
-
-def display_lineups(slate_df: pd.DataFrame, lineup_list: List[Dict[str, Any]], sport: str):
-    """Display generated lineups."""
-    if not lineup_list:
-        st.error("❌ No lineups to display.")
-        return
-    
-    best = lineup_list[0]
-    
-    st.subheader("Top Lineup Snapshot")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        st.metric("Projected Points", f"{best['proj_score']:.2f}")
-    with c2:
-        st.metric("Salary Used", f"${best['salary_used']:,}")
-    with c3:
-        st.metric("Total Ownership", f"{best['total_own']:.1f}%")
-    with c4:
-        st.metric("Correlation Score", f"{best['correlation']:.1f}")
-    
-    st.markdown("---")
-    st.subheader("Lineup Summary")
-    
-    rows = []
-    for i, lu in enumerate(lineup_list, start=1):
-        rows.append({
-            "Lineup": i,
-            "Proj": lu["proj_score"],
-            "Corr": lu["correlation"],
-            "Own%": lu["total_own"],
-            "Salary": lu["salary_used"],
-        })
-    
-    summary_df = pd.DataFrame(rows).set_index("Lineup")
-    st.dataframe(
-        summary_df.style.format({
-            "Proj": "{:.2f}",
-            "Corr": "{:.1f}",
-            "Own%": "{:.1f}",
-            "Salary": "${:,}"
-        }),
-        use_container_width=True,
-    )
-    
-    st.markdown("---")
-    st.subheader("Lineup Detail")
-    
-    options = [
-        f"Lineup {i} (Proj {lu['proj_score']:.2f}, Corr {lu['correlation']:.1f})"
-        for i, lu in enumerate(lineup_list, start=1)
-    ]
-    choice = st.selectbox("Choose lineup:", options)
-    idx = options.index(choice)
-    chosen = lineup_list[idx]
-    chosen_df = slate_df[slate_df["player_id"].isin(chosen["player_ids"])].copy()
-    
-    if sport == "NBA":
-        chosen_df = assign_nba_positions(chosen_df)
-        roster_order = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
-    else:
-        chosen_df = assign_nfl_positions(chosen_df)
-        roster_order = ["QB", "RB", "WR", "TE", "FLEX", "DST"]
-    
-    cat_type = CategoricalDtype(roster_order, ordered=True)
-    chosen_df["roster_slot"] = chosen_df["roster_slot"].astype(cat_type)
-    chosen_df = chosen_df.sort_values("roster_slot")
-    
-    display_cols = [
-        "roster_slot", "Name", "positions", "Team", "Opponent",
-        "Salary", "proj", "value", "own_proj", "own_bucket"
-    ]
-    df_disp = chosen_df[display_cols].copy()
-    df_disp.rename(columns={
-        "roster_slot": "SLOT",
-        "positions": "POS",
-        "proj": "Proj",
-        "own_proj": "Own%",
-        "own_bucket": "Bucket",
-    }, inplace=True)
-    
-    st.dataframe(
-        df_disp.style.format({
-            "Salary": "${:,}",
-            "Proj": "{:.1f}",
-            "value": "{:.2f}",
-            "Own%": "{:.1f}%",
-        }),
-        use_container_width=True,
-        hide_index=True
-    )
-
 
 # -------------------------------------------------------------------
-# SESSION STATE
+# STREAMLIT UI
 # -------------------------------------------------------------------
 
-if "slate_df" not in st.session_state:
-    st.session_state["slate_df"] = pd.DataFrame()
-if "lineups" not in st.session_state:
-    st.session_state["lineups"] = []
-if "sport" not in st.session_state:
-    st.session_state["sport"] = "NBA"
+def init_session_state():
+    """Initialize session state."""
+    if "pool" not in st.session_state:
+        st.session_state.pool = pd.DataFrame()
+    if "sport" not in st.session_state:
+        st.session_state.sport = Sport.UNKNOWN
+    if "lineups" not in st.session_state:
+        st.session_state.lineups = []
 
-# -------------------------------------------------------------------
-# MAIN APP
-# -------------------------------------------------------------------
 
-st.title("🏀🏈 Advanced DFS Lineup Builder")
-st.caption("With Correlation Logic, Game Stacks & NFL Support")
-
-# Sidebar
-st.sidebar.title("Settings")
-
-sport_icon = "🏀" if st.session_state.get("sport", "NBA") == "NBA" else "🏈"
-st.sidebar.markdown(f"### {sport_icon} Detected Sport: **{st.session_state.get('sport', 'NBA')}**")
-
-contest_type = st.sidebar.selectbox(
-    "Contest Type",
-    options=["Cash Game", "Single Entry", "3-Max", "20-Max", "150-Max"],
-    index=1,
-)
-
-# Correlation strength
-default_corr = {
-    "Cash Game": 0.2,
-    "Single Entry": 0.5,
-    "3-Max": 0.6,
-    "20-Max": 0.75,
-    "150-Max": 0.85
-}.get(contest_type, 0.5)
-
-correlation_strength = st.sidebar.slider(
-    "Correlation Strength",
-    min_value=0.0,
-    max_value=1.0,
-    value=default_corr,
-    step=0.05,
-    help="0.0 = No correlation (value-based only)\n1.0 = Maximum stacking"
-)
-
-st.sidebar.caption(
-    f"**Current:** {'Minimal' if correlation_strength < 0.3 else 'Moderate' if correlation_strength < 0.6 else 'High' if correlation_strength < 0.8 else 'Maximum'} correlation"
-)
-
-# Default n_lineups
-default_n = {
-    "Cash Game": 1,
-    "Single Entry": 1,
-    "3-Max": 3,
-    "20-Max": 20,
-    "150-Max": 40
-}.get(contest_type, 10)
-
-n_lineups = st.sidebar.slider(
-    "Number of Lineups",
-    min_value=1,
-    max_value=50,
-    value=default_n,
-)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Load Data")
-
-uploaded_file = st.sidebar.file_uploader(
-    "Upload CSV",
-    type=["csv"],
-    help="DraftKings format: Player, Salary, Position, Team, Opponent, Projection, Ownership"
-)
-
-if uploaded_file:
-    with st.spinner("Loading data..."):
-        raw_df = pd.read_csv(uploaded_file)
-        slate_df = normalize_df(raw_df)
+def main():
+    init_session_state()
+    
+    st.title("🏆 Elite Multi-Sport DFS Lineup Builder")
+    st.caption("Advanced contrarian lineup generation for NBA, NFL, MLB, NHL")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Settings")
         
-        if not slate_df.empty:
-            sport = detect_sport(slate_df)
-            slate_df = add_metrics(slate_df, sport)
+        uploaded_file = st.file_uploader(
+            "Upload Player Pool CSV",
+            type=["csv"],
+            help="DraftKings format: Player, Salary, Position, Team, Opponent, Projection, Ownership"
+        )
+        
+        if uploaded_file:
+            with st.spinner("Loading data..."):
+                raw_df = pd.read_csv(uploaded_file)
+                pool = normalize_csv_data(raw_df)
+                
+                if not pool.empty:
+                    sport = detect_sport_from_positions(pool)
+                    
+                    if sport == Sport.UNKNOWN:
+                        st.error("❌ Could not detect sport from positions")
+                        st.stop()
+                    
+                    pool = calculate_metrics(pool, sport)
+                    
+                    st.session_state.pool = pool
+                    st.session_state.sport = sport
+                    
+                    config = SPORT_CONFIGS[sport]
+                    sport_icon = {"NBA": "🏀", "NFL": "🏈", "MLB": "⚾", "NHL": "🏒"}.get(sport.value, "🎯")
+                    
+                    st.success(f"{sport_icon} Detected: **{sport.value}**")
+                    st.metric("Players Loaded", len(pool))
+        
+        if st.session_state.sport != Sport.UNKNOWN:
+            st.markdown("---")
             
-            st.session_state["slate_df"] = slate_df
-            st.session_state["sport"] = sport
-            st.sidebar.success(f"✅ Loaded {len(slate_df)} players ({sport})")
-        else:
-            st.sidebar.error("❌ Failed to load data")
-
-slate_df = st.session_state["slate_df"]
-sport = st.session_state.get("sport", "NBA")
-
-if slate_df.empty:
-    st.info("👆 Upload a player pool CSV to begin")
-    st.markdown("""
-    ### Required CSV Columns:
-    - **Player** or Name
-    - **Salary**
-    - **Position** (PG/SG/SF/PF/C for NBA, QB/RB/WR/TE/DST for NFL)
-    - **Team**
-    - **Opponent**
-    - **Projection** or Proj
-    - **Ownership** or Own%
+            contest_type = st.selectbox(
+                "Contest Type",
+                ["GPP - Large Field", "GPP - Mid Field", "Single Entry", "Cash Game"],
+                index=0
+            )
+            
+            # Auto-set correlation based on contest
+            default_corr = {
+                "GPP - Large Field": 0.8,
+                "GPP - Mid Field": 0.6,
+                "Single Entry": 0.5,
+                "Cash Game": 0.2
+            }[contest_type]
+            
+            correlation = st.slider(
+                "Correlation Strength",
+                0.0, 1.0, default_corr, 0.05,
+                help="Higher = more stacking and contrarian plays"
+            )
+            
+            n_lineups = st.number_input(
+                "Number of Lineups",
+                min_value=1,
+                max_value=150,
+                value=20 if "Large Field" in contest_type else 1,
+                step=1
+            )
+            
+            st.markdown("---")
+            st.caption("🎯 Strategy: Contrarian + Leverage")
+            st.caption(f"📊 Ownership Target: <30%")
+            st.caption(f"🔥 Focus: Ceiling > Floor")
     
-    The app will auto-detect NBA vs NFL based on positions.
-    """)
-else:
-    # Get position rules
-    pos_rules = get_position_rules(sport)
-    roster_size = pos_rules["roster_size"]
-    salary_cap = pos_rules["salary_cap"]
+    # Main content
+    pool = st.session_state.pool
+    sport = st.session_state.sport
     
-    st.subheader(f"{sport_icon} Player Pool")
+    if pool.empty:
+        st.info("👆 Upload a player pool CSV to begin")
+        st.markdown("""
+        ### Required Columns:
+        - **Player** or Name
+        - **Salary**
+        - **Position** (PG/SG/SF/PF/C for NBA, QB/RB/WR/TE/DST for NFL)
+        - **Team**
+        - **Opponent**
+        - **Projection** or Proj
+        - **Ownership** or Own% (optional, will default to 15%)
+        """)
+        st.stop()
+    
+    # Display pool
+    st.subheader(f"{SPORT_CONFIGS[sport].name} Player Pool")
     
     # Filters
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        teams = sorted(slate_df["Team"].unique())
-        selected_teams = st.multiselect(
-            "Filter by Team",
-            options=teams,
-            default=teams
+        own_filters = st.multiselect(
+            "Ownership Tier",
+            ["super-contrarian", "contrarian", "mid", "chalk", "mega-chalk"],
+            default=["super-contrarian", "contrarian", "mid"]
         )
     
     with col2:
-        buckets = ["mega", "chalk", "mid", "punt"]
-        selected_buckets = st.multiselect(
-            "Filter by Ownership Bucket",
-            options=buckets,
-            default=buckets
+        if pool["team"].notna().any():
+            teams = sorted(pool["team"].dropna().unique())
+            selected_teams = st.multiselect(
+                "Teams",
+                teams,
+                default=teams
+            )
+        else:
+            selected_teams = []
+    
+    with col3:
+        min_value = st.slider(
+            "Min Value",
+            float(pool["value"].min()),
+            float(pool["value"].max()),
+            float(pool["value"].min()),
+            0.1
         )
     
-    filtered_df = slate_df[
-        (slate_df["Team"].isin(selected_teams)) &
-        (slate_df["own_bucket"].isin(selected_buckets))
+    # Filter pool
+    filtered = pool[
+        (pool["own_tier"].isin(own_filters)) &
+        (pool["team"].isin(selected_teams) if selected_teams else True) &
+        (pool["value"] >= min_value)
     ].copy()
     
-    # Ensure columns
-    if "Lock" not in filtered_df.columns:
-        filtered_df["Lock"] = False
-    if "Exclude" not in filtered_df.columns:
-        filtered_df["Exclude"] = False
-    if "player_id" not in filtered_df.columns:
-        filtered_df["player_id"] = (
-            filtered_df["Name"].astype(str) + "_" +
-            filtered_df["Team"].astype(str) + "_" +
-            filtered_df["Salary"].astype(str)
-        )
+    # Add lock/exclude columns
+    if "lock" not in filtered.columns:
+        filtered["lock"] = False
+    if "exclude" not in filtered.columns:
+        filtered["exclude"] = False
     
-    column_config = {
-        "Lock": st.column_config.CheckboxColumn("🔒"),
-        "Exclude": st.column_config.CheckboxColumn("❌"),
-        "player_id": None,
-        "Name": st.column_config.TextColumn("Player", disabled=True),
-        "positions": st.column_config.TextColumn("Pos", disabled=True),
-        "Salary": st.column_config.NumberColumn("Salary", format="$%d"),
-        "proj": st.column_config.NumberColumn("Proj", format="%.1f"),
-        "value": st.column_config.NumberColumn("Value", format="%.2f"),
-        "own_proj": st.column_config.NumberColumn("Own%", format="%.1f%%"),
-        "leverage": st.column_config.NumberColumn("Lev", format="%+.1f"),
-        "ceiling": st.column_config.NumberColumn("Ceil", format="%.1f"),
-        "own_bucket": st.column_config.TextColumn("Bucket"),
-    }
-    
-    column_order = [
-        "Lock", "Exclude", "player_id", "Name", "positions", "Team", "Opponent",
-        "Salary", "proj", "value", "own_proj", "leverage", "ceiling", "own_bucket"
+    # Display
+    display_cols = [
+        "lock", "exclude", "name", "positions", "team", "opp",
+        "salary", "proj", "value", "own", "leverage", "ceiling", "own_tier", "gpp_score"
     ]
     
-    edited_df = st.data_editor(
-        filtered_df[column_order],
-        column_config=column_config,
+    edited = st.data_editor(
+        filtered[display_cols],
+        column_config={
+            "lock": st.column_config.CheckboxColumn("🔒"),
+            "exclude": st.column_config.CheckboxColumn("❌"),
+            "name": st.column_config.TextColumn("Player", width="medium"),
+            "positions": st.column_config.TextColumn("Pos", width="small"),
+            "salary": st.column_config.NumberColumn("Salary", format="$%d"),
+            "proj": st.column_config.NumberColumn("Proj", format="%.1f"),
+            "value": st.column_config.NumberColumn("Value", format="%.2f"),
+            "own": st.column_config.NumberColumn("Own%", format="%.1f%%"),
+            "leverage": st.column_config.NumberColumn("Lev", format="%+.1f"),
+            "ceiling": st.column_config.NumberColumn("Ceil", format="%.1f"),
+            "own_tier": st.column_config.TextColumn("Tier", width="small"),
+            "gpp_score": st.column_config.NumberColumn("GPP Score", format="%.1f"),
+        },
         hide_index=True,
         use_container_width=True,
-        height=400,
-        key="player_editor"
+        height=400
     )
     
-    # Update state safely
-    if "player_id" in edited_df.columns:
-        for idx, row in edited_df.iterrows():
-            pid = row.get("player_id")
-            if pid and pid in st.session_state["slate_df"]["player_id"].values:
-                mask = st.session_state["slate_df"]["player_id"] == pid
-                st.session_state["slate_df"].loc[mask, "Lock"] = row.get("Lock", False)
-                st.session_state["slate_df"].loc[mask, "Exclude"] = row.get("Exclude", False)
+    # Get locks and excludes
+    locks = edited[edited["lock"] == True]["player_id"].tolist() if "player_id" in edited.columns else []
+    excludes = edited[edited["exclude"] == True]["player_id"].tolist() if "player_id" in edited.columns else []
     
-    locked_ids = []
-    excluded_ids = []
-    
-    if "Lock" in edited_df.columns and "player_id" in edited_df.columns:
-        locked_ids = edited_df[edited_df["Lock"] == True]["player_id"].tolist()
-    
-    if "Exclude" in edited_df.columns and "player_id" in edited_df.columns:
-        excluded_ids = edited_df[edited_df["Exclude"] == True]["player_id"].tolist()
-    
-    if locked_ids or excluded_ids:
-        st.caption(f"🔒 Locked: {len(locked_ids)}  •  ❌ Excluded: {len(excluded_ids)}")
+    if locks or excludes:
+        st.caption(f"🔒 Locked: {len(locks)}  •  ❌ Excluded: {len(excludes)}")
     
     st.markdown("---")
     
-    if st.button("🚀 Generate Lineups", type="primary"):
-        pool_for_build = st.session_state["slate_df"].copy()
-        
-        with st.spinner(f"Building {n_lineups} lineups with correlation..."):
-            lineups = generate_lineups_advanced(
-                pool=pool_for_build,
+    # Generate button
+    if st.button("🚀 Generate Lineups", type="primary", use_container_width=True):
+        with st.spinner(f"Building {n_lineups} contrarian lineups..."):
+            lineups = generate_lineup_set(
+                pool=pool,
                 sport=sport,
-                n_lineups=n_lineups,
-                roster_size=roster_size,
-                salary_cap=salary_cap,
-                locked_ids=locked_ids,
-                excluded_ids=excluded_ids,
-                correlation_strength=correlation_strength,
+                n_lineups=int(n_lineups),
+                locks=locks,
+                excludes=excludes,
+                correlation_strength=correlation
             )
         
         if not lineups:
-            st.error(
-                "❌ Could not generate valid lineups.\n\n"
-                "Try:\n"
-                "- Lowering correlation strength\n"
-                "- Reducing locked players\n"
-                "- Removing some excludes"
-            )
+            st.error("❌ Could not generate lineups. Try adjusting locks/excludes or correlation.")
         else:
-            st.session_state["lineups"] = lineups
+            st.session_state.lineups = lineups
             st.success(f"✅ Generated {len(lineups)} lineups")
     
-    if st.session_state["lineups"]:
+    # Display lineups
+    if st.session_state.lineups:
         st.markdown("---")
-        display_lineups(st.session_state["slate_df"], st.session_state["lineups"], sport)
+        st.subheader("💎 Generated Lineups")
+        
+        lineups = st.session_state.lineups
+        
+        # Summary
+        summary_data = []
+        for i, lu in enumerate(lineups, 1):
+            summary_data.append({
+                "Lineup": i,
+                "Proj": lu["proj"],
+                "Ceil": lu["ceiling"],
+                "Own%": lu["own"],
+                "Lev": lu["leverage"],
+                "Salary": lu["salary"]
+            })
+        
+        summary_df = pd.DataFrame(summary_data)
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Avg Projection", f"{summary_df['Proj'].mean():.1f}")
+        with col2:
+            st.metric("Avg Ownership", f"{summary_df['Own%'].mean():.1f}%")
+        with col3:
+            st.metric("Avg Leverage", f"{summary_df['Lev'].mean():.1f}")
+        
+        st.dataframe(
+            summary_df.style.format({
+                "Proj": "{:.1f}",
+                "Ceil": "{:.1f}",
+                "Own%": "{:.1f}",
+                "Lev": "{:+.1f}",
+                "Salary": "${:,}"
+            }),
+            use_container_width=True
+        )
+        
+        # Detail view
+        st.markdown("---")
+        st.subheader("Lineup Detail")
+        
+        options = [f"Lineup {i} (Proj {lu['proj']:.1f}, Own {lu['own']:.1f}%)" 
+                   for i, lu in enumerate(lineups, 1)]
+        choice = st.selectbox("Select lineup:", options)
+        idx = options.index(choice)
+        
+        chosen = lineups[idx]
+        lineup_df = pool[pool["player_id"].isin(chosen["player_ids"])]
+        lineup_df = assign_positions(lineup_df, sport)
+        
+        st.dataframe(
+            lineup_df[[
+                "slot", "name", "positions", "team", "opp",
+                "salary", "proj", "own", "leverage", "ceiling", "own_tier"
+            ]].style.format({
+                "salary": "${:,}",
+                "proj": "{:.1f}",
+                "own": "{:.1f}%",
+                "leverage": "{:+.1f}",
+                "ceiling": "{:.1f}"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Export
+        st.markdown("---")
+        if st.button("📥 Export All Lineups to CSV"):
+            # Create export format
+            export_rows = []
+            for lu in lineups:
+                lineup_df = pool[pool["player_id"].isin(lu["player_ids"])]
+                lineup_df = assign_positions(lineup_df, sport)
+                
+                row = {}
+                for _, player in lineup_df.iterrows():
+                    slot = player["slot"]
+                    row[f"{slot}"] = player["name"]
+                    row[f"{slot}_ID"] = player["player_id"]
+                
+                row["Projection"] = lu["proj"]
+                row["Salary"] = lu["salary"]
+                row["Ownership"] = lu["own"]
+                export_rows.append(row)
+            
+            export_df = pd.DataFrame(export_rows)
+            csv = export_df.to_csv(index=False)
+            
+            st.download_button(
+                "Download CSV",
+                csv,
+                "lineups_export.csv",
+                "text/csv",
+                key="download"
+            )
+
+
+if __name__ == "__main__":
+    main()
