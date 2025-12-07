@@ -508,15 +508,22 @@ else:
         (slate_df["own_bucket"].isin(selected_buckets))
     ].copy()
     
-    # Display with Lock/Exclude checkboxes
+    # Ensure required columns exist
     if "Lock" not in filtered_df.columns:
         filtered_df["Lock"] = False
     if "Exclude" not in filtered_df.columns:
         filtered_df["Exclude"] = False
+    if "player_id" not in filtered_df.columns:
+        filtered_df["player_id"] = (
+            filtered_df["Name"].astype(str) + "_" + 
+            filtered_df["Team"].astype(str) + "_" + 
+            filtered_df["Salary"].astype(str)
+        )
     
     column_config = {
         "Lock": st.column_config.CheckboxColumn("🔒"),
         "Exclude": st.column_config.CheckboxColumn("❌"),
+        "player_id": None,  # Hide this column
         "Name": st.column_config.TextColumn("Player", disabled=True),
         "positions": st.column_config.TextColumn("Pos", disabled=True),
         "Salary": st.column_config.NumberColumn("Salary", format="$%d"),
@@ -529,7 +536,7 @@ else:
     }
     
     column_order = [
-        "Lock", "Exclude", "Name", "positions", "Team", "Opponent",
+        "Lock", "Exclude", "player_id", "Name", "positions", "Team", "Opponent",
         "Salary", "proj", "value", "own_proj", "leverage", "ceiling", "own_bucket"
     ]
     
@@ -542,15 +549,24 @@ else:
         key="player_editor"
     )
     
-    # Update session state with edits
-    for idx, row in edited_df.iterrows():
-        st.session_state["slate_df"].loc[
-            st.session_state["slate_df"]["player_id"] == row["player_id"],
-            ["Lock", "Exclude"]
-        ] = [row["Lock"], row["Exclude"]]
+    # Update session state with edits - safer approach
+    if "player_id" in edited_df.columns:
+        for idx, row in edited_df.iterrows():
+            pid = row.get("player_id")
+            if pid and pid in st.session_state["slate_df"]["player_id"].values:
+                mask = st.session_state["slate_df"]["player_id"] == pid
+                st.session_state["slate_df"].loc[mask, "Lock"] = row.get("Lock", False)
+                st.session_state["slate_df"].loc[mask, "Exclude"] = row.get("Exclude", False)
     
-    locked_ids = edited_df[edited_df["Lock"] == True]["player_id"].tolist()
-    excluded_ids = edited_df[edited_df["Exclude"] == True]["player_id"].tolist()
+    # Get locked/excluded from edited df
+    locked_ids = []
+    excluded_ids = []
+    
+    if "Lock" in edited_df.columns and "player_id" in edited_df.columns:
+        locked_ids = edited_df[edited_df["Lock"] == True]["player_id"].tolist()
+    
+    if "Exclude" in edited_df.columns and "player_id" in edited_df.columns:
+        excluded_ids = edited_df[edited_df["Exclude"] == True]["player_id"].tolist()
     
     if locked_ids or excluded_ids:
         st.caption(f"🔒 Locked: {len(locked_ids)}  •  ❌ Excluded: {len(excluded_ids)}")
