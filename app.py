@@ -1,30 +1,31 @@
 import io
 from typing import Dict, Any, List
-from collections import Counter
 
 import numpy as np
 import pandas as pd
 from pandas.api.types import CategoricalDtype
 import streamlit as st
 
-# Import from builder
 from builder import (
     ownership_bucket,
     build_game_environments,
     build_team_stacks,
     calculate_lineup_correlation_score,
 )
-
-from nfl_stacks import build_nfl_stacks, identify_nfl_bringback, validate_nfl_lineup, calculate_nfl_correlation_score
-
-# ======================================================================================
-# UTILS / CONSTANTS
-# ======================================================================================
+from nfl_stacks import (
+    build_nfl_stacks,
+    identify_nfl_bringback,
+    validate_nfl_lineup,
+    calculate_nfl_correlation_score,
+)
 
 st.set_page_config(
     page_title="DFS Lineup Explorer (Enhanced)",
     layout="wide"
 )
+
+st.write("✅ App booted to top-level")  # <-- add this
+
 
 # Column mapping constants
 PLAYER_ID_COLS = ["Id", "ID", "Player ID", "PlayerID"]
