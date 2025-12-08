@@ -482,37 +482,49 @@ if uploaded_file:
     
     st.subheader(f"📊 Player Pool ({len(filtered)} players)")
     
-    # Display
+    # Display (without player_id column, but keep it in filtered)
+    display_df = filtered[[
+        "lock", "exclude", "name", "positions", "team", "opp",
+        "salary", "proj", "value", "own", "leverage", 
+        "game_env", "ceiling", "gpp_score"
+    ]].copy()
+    
     edited = st.data_editor(
-        filtered[[
-            "lock", "exclude", "name", "positions", "team", "opp",
-            "salary", "proj", "value", "own", "leverage", 
-            "game_env", "ceiling", "gpp_score"
-        ]],
+        display_df,
         column_config={
             "lock": st.column_config.CheckboxColumn("🔒"),
             "exclude": st.column_config.CheckboxColumn("❌"),
             "game_env": st.column_config.TextColumn("Game"),
+            "salary": st.column_config.NumberColumn("Salary", format="$%d"),
+            "proj": st.column_config.NumberColumn("Proj", format="%.1f"),
+            "value": st.column_config.NumberColumn("Val", format="%.2f"),
+            "own": st.column_config.NumberColumn("Own%", format="%.1f%%"),
+            "leverage": st.column_config.NumberColumn("Lev", format="%+.1f"),
+            "ceiling": st.column_config.NumberColumn("Ceil", format="%.1f"),
+            "gpp_score": st.column_config.NumberColumn("GPP", format="%.1f"),
         },
         hide_index=True,
         use_container_width=True,
         height=400
     )
     
-    # Get locks/excludes
-    locks = edited[edited["lock"]]["player_id"].tolist() if "player_id" in filtered.columns else []
-    excludes = edited[edited["exclude"]]["player_id"].tolist() if "player_id" in filtered.columns else []
+    # Get locks/excludes by matching back to original filtered dataframe
+    locks = []
+    excludes = []
     
-    # Update filtered with player_id
-    filtered = filtered.merge(
-        edited[["name", "positions", "lock", "exclude"]],
-        on=["name", "positions"],
-        how="left",
-        suffixes=("", "_edit")
-    )
-    
-    locks = filtered[filtered["lock_edit"] == True]["player_id"].tolist()
-    excludes = filtered[filtered["exclude_edit"] == True]["player_id"].tolist()
+    for idx, row in edited.iterrows():
+        # Find matching player in filtered
+        match = filtered[
+            (filtered["name"] == row["name"]) & 
+            (filtered["positions"] == row["positions"])
+        ]
+        
+        if not match.empty:
+            player_id = match.iloc[0]["player_id"]
+            if row["lock"]:
+                locks.append(player_id)
+            if row["exclude"]:
+                excludes.append(player_id)
     
     # Generate
     if st.button("🚀 Generate Lineups", type="primary", use_container_width=True):
