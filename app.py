@@ -552,13 +552,15 @@ def generate_contrarian_lineup(
     rng: np.random.Generator
 ) -> Optional[Dict[str, Any]]:
     """
-    Generate single contrarian lineup.
+    Generate single contrarian lineup with smart tournament strategy.
     
     Strategy:
     1. Start with locks
-    2. Apply stacking if correlation > 0.5
-    3. Fill with contrarian + value plays
-    4. Avoid chalk traps
+    2. Build around stack if high correlation
+    3. Add anchor play (high ceiling, reasonable ownership)
+    4. Fill with contrarian value
+    5. Add 1-2 punt plays for salary relief
+    6. Validate position requirements
     """
     
     # Start with locks
@@ -578,8 +580,9 @@ def generate_contrarian_lineup(
         (~pool["player_id"].isin(excludes))
     ].copy()
     
-    # Apply stacking if enabled
-    if correlation_strength > 0.5 and stacks and remaining_spots >= 2:
+    # PHASE 1: STACKING (if high correlation)
+    stack_players = []
+    if correlation_strength >= 0.6 and stacks and remaining_spots >= 2 and not selected:
         # Pick a random stack
         all_stacks = []
         for stack_list in stacks.values():
@@ -588,12 +591,12 @@ def generate_contrarian_lineup(
         if all_stacks:
             # Weight by score
             stack_scores = np.array([s["score"] for s in all_stacks])
-            stack_scores = np.maximum(stack_scores, 1)  # Avoid zeros
+            stack_scores = np.maximum(stack_scores, 1)
             probs = stack_scores / stack_scores.sum()
             
             chosen_stack = rng.choice(all_stacks, p=probs)
             
-            # Add stack players
+            # Try to add stack players
             for pid in chosen_stack["players"]:
                 if pid not in selected and remaining_spots > 0:
                     player = available[available["player_id"] == pid]
@@ -601,18 +604,47 @@ def generate_contrarian_lineup(
                         sal = int(player.iloc[0]["salary"])
                         if sal <= remaining_cap:
                             selected.append(pid)
+                            stack_players.append(pid)
                             remaining_cap -= sal
                             remaining_spots -= 1
     
-    # Fill remaining with contrarian + value
-    # BUT ensure position requirements can be met!
+    # PHASE 2: ANCHOR PLAY (if no stack or room for one)
+    # High ceiling player with <30% ownership to anchor lineup
+    if remaining_spots >= 1 and len([p for p in selected if p not in stack_players]) == 0:
+        available = pool[
+            (~pool["player_id"].isin(selected)) &
+            (~pool["player_id"].isin(excludes))
+        ].copy()
+        
+        # Find anchor candidates: high ceiling, under 30% owned
+        anchors = available[
+            (available["own"] < 30) &
+            (available["ceiling"] >= available["ceiling"].quantile(0.75))
+        ].copy()
+        
+        if not anchors.empty:
+            # Score by ceiling and leverage
+            anchors["anchor_score"] = (
+                anchors["ceiling"] * 0.6 +
+                anchors["leverage"] * 2
+            )
+            anchors = anchors.sort_values("anchor_score", ascending=False)
+            
+            for _, anchor in anchors.head(5).iterrows():
+                if anchor["salary"] <= remaining_cap:
+                    selected.append(anchor["player_id"])
+                    remaining_cap -= int(anchor["salary"])
+                    remaining_spots -= 1
+                    break
+    
+    # PHASE 3: POSITION-AWARE FILLING
+    # Ensure we can fill all required positions
     available = pool[
         (~pool["player_id"].isin(selected)) &
         (~pool["player_id"].isin(excludes))
     ].copy()
     
     if remaining_spots > 0 and not available.empty:
-        # Check what positions we still need
         selected_df = pool[pool["player_id"].isin(selected)]
         
         if sport == Sport.NBA:
@@ -624,49 +656,78 @@ def generate_contrarian_lineup(
                     if pos in pos_counts:
                         pos_counts[pos] += 1
             
-            # Calculate what we need (minimum)
-            guards_needed = max(0, 3 - (pos_counts["PG"] + pos_counts["SG"]))
-            forwards_needed = max(0, 3 - (pos_counts["SF"] + pos_counts["PF"]))
-            centers_needed = max(0, 1 - pos_counts["C"])
+            # Build priority list
+            positions_needed = []
             
-            # Prioritize filling position gaps
-            priority_positions = []
-            if centers_needed > 0:
-                priority_positions.extend(["C"] * centers_needed)
-            if forwards_needed > 0:
-                priority_positions.extend(["SF", "PF", "SF/PF"] * forwards_needed)
-            if guards_needed > 0:
-                priority_positions.extend(["PG", "SG", "PG/SG"] * guards_needed)
+            # Always ensure we can fill required positions
+            if pos_counts["C"] < 1:
+                positions_needed.append(("C", 1 - pos_counts["C"], "must"))
             
-            # Fill priority positions first
-            for priority_pos in priority_positions:
-                if remaining_spots == 0:
-                    break
-                
-                # Find players with this position
-                priority_players = available[
-                    available["positions"].str.contains(priority_pos, case=False, na=False, regex=False)
-                ]
-                
-                if not priority_players.empty:
-                    # Score and pick best
-                    priority_players = priority_players.copy()
-                    priority_players["selection_score"] = (
-                        priority_players["gpp_score"] * 0.6 +
-                        (100 - priority_players["own"]) * 0.4 +
-                        rng.normal(0, 10, len(priority_players))
-                    )
-                    priority_players = priority_players.sort_values("selection_score", ascending=False)
+            guards_have = pos_counts["PG"] + pos_counts["SG"]
+            if guards_have < 3:
+                positions_needed.append(("PG/SG", 3 - guards_have, "must"))
+            
+            forwards_have = pos_counts["SF"] + pos_counts["PF"]
+            if forwards_have < 3:
+                positions_needed.append(("SF/PF", 3 - forwards_have, "must"))
+            
+            # Add flex needs
+            if guards_have < 4:
+                positions_needed.append(("PG/SG", 1, "flex"))
+            if forwards_have < 4:
+                positions_needed.append(("SF/PF", 1, "flex"))
+            
+            # Fill must-have positions first
+            for pos_str, count, priority in sorted(positions_needed, key=lambda x: (x[2] != "must", x[1])):
+                for _ in range(count):
+                    if remaining_spots == 0:
+                        break
                     
-                    for _, player in priority_players.iterrows():
-                        if remaining_spots == 0:
-                            break
-                        if player["salary"] <= remaining_cap:
-                            selected.append(player["player_id"])
-                            remaining_cap -= int(player["salary"])
-                            remaining_spots -= 1
-                            available = available[available["player_id"] != player["player_id"]]
-                            break
+                    # Find eligible players
+                    if "/" in pos_str:
+                        pos_options = pos_str.split("/")
+                        eligible = available[
+                            available["positions"].apply(
+                                lambda x: any(p in str(x).upper() for p in pos_options)
+                            )
+                        ].copy()
+                    else:
+                        eligible = available[
+                            available["positions"].str.contains(pos_str, case=False, na=False)
+                        ].copy()
+                    
+                    if eligible.empty:
+                        continue
+                    
+                    # Smart scoring based on priority
+                    if priority == "must":
+                        # For must-have: balance value and ownership
+                        eligible["pick_score"] = (
+                            eligible["value"] * 15 +
+                            eligible["ceiling"] * 0.3 +
+                            (50 - eligible["own"]) * 0.5
+                        )
+                    else:
+                        # For flex: favor contrarian upside
+                        eligible["pick_score"] = (
+                            eligible["ceiling"] * 0.5 +
+                            eligible["leverage"] * 1.5 +
+                            (100 - eligible["own"]) * 0.3 +
+                            rng.normal(0, 5, len(eligible))
+                        )
+                    
+                    # Filter by salary and pick best
+                    eligible = eligible[eligible["salary"] <= remaining_cap]
+                    if eligible.empty:
+                        continue
+                    
+                    eligible = eligible.sort_values("pick_score", ascending=False)
+                    chosen = eligible.iloc[0]
+                    
+                    selected.append(chosen["player_id"])
+                    remaining_cap -= int(chosen["salary"])
+                    remaining_spots -= 1
+                    available = available[available["player_id"] != chosen["player_id"]]
         
         elif sport == Sport.NFL:
             # Count what we have
@@ -679,83 +740,107 @@ def generate_contrarian_lineup(
                     if pos == "DEF":
                         pos_counts["DST"] += 1
             
-            # Calculate what we need
-            qb_needed = max(0, 1 - pos_counts["QB"])
-            rb_needed = max(0, 2 - pos_counts["RB"])
-            wr_needed = max(0, 3 - pos_counts["WR"])
-            te_needed = max(0, 1 - pos_counts["TE"])
-            dst_needed = max(0, 1 - pos_counts["DST"])
+            # Build priority list (most restrictive first)
+            positions_needed = []
             
-            # Fill priority positions
-            priority_positions = []
-            if qb_needed > 0:
-                priority_positions.extend(["QB"] * qb_needed)
-            if dst_needed > 0:
-                priority_positions.extend(["DST"] * dst_needed)
-            if te_needed > 0:
-                priority_positions.extend(["TE"] * te_needed)
-            if rb_needed > 0:
-                priority_positions.extend(["RB"] * rb_needed)
-            if wr_needed > 0:
-                priority_positions.extend(["WR"] * wr_needed)
+            if pos_counts["QB"] < 1:
+                positions_needed.append(("QB", 1, "must"))
+            if pos_counts["DST"] < 1:
+                positions_needed.append(("DST", 1, "must"))
+            if pos_counts["TE"] < 1:
+                positions_needed.append(("TE", 1, "must"))
+            if pos_counts["RB"] < 2:
+                positions_needed.append(("RB", 2 - pos_counts["RB"], "must"))
+            if pos_counts["WR"] < 3:
+                positions_needed.append(("WR", 3 - pos_counts["WR"], "must"))
+            if pos_counts["RB"] + pos_counts["WR"] + pos_counts["TE"] < 6:
+                positions_needed.append(("RB/WR/TE", 1, "flex"))
             
-            for priority_pos in priority_positions:
-                if remaining_spots == 0:
-                    break
-                
-                priority_players = available[
-                    available["positions"].str.contains(priority_pos, case=False, na=False, regex=False)
-                ]
-                
-                if not priority_players.empty:
-                    priority_players = priority_players.copy()
-                    priority_players["selection_score"] = (
-                        priority_players["gpp_score"] * 0.6 +
-                        (100 - priority_players["own"]) * 0.4 +
-                        rng.normal(0, 10, len(priority_players))
-                    )
-                    priority_players = priority_players.sort_values("selection_score", ascending=False)
-                    
-                    for _, player in priority_players.iterrows():
-                        if remaining_spots == 0:
-                            break
-                        if player["salary"] <= remaining_cap:
-                            selected.append(player["player_id"])
-                            remaining_cap -= int(player["salary"])
-                            remaining_spots -= 1
-                            available = available[available["player_id"] != player["player_id"]]
-                            break
-        
-        # Fill any remaining spots with best available
-        if remaining_spots > 0:
-            available = pool[
-                (~pool["player_id"].isin(selected)) &
-                (~pool["player_id"].isin(excludes))
-            ].copy()
-            
-            if not available.empty:
-                # Score players: favor low ownership + high value
-                available["selection_score"] = (
-                    available["gpp_score"] * 0.6 +
-                    (100 - available["own"]) * 0.4 +
-                    rng.normal(0, 10, len(available))
-                )
-                
-                # Avoid mega-chalk
-                available_filtered = available[available["own"] < 40]
-                if available_filtered.empty:
-                    available_filtered = available
-                
-                available_filtered = available_filtered.sort_values("selection_score", ascending=False)
-                
-                # Greedy fill
-                for _, player in available_filtered.iterrows():
+            # Fill positions
+            for pos_str, count, priority in positions_needed:
+                for _ in range(count):
                     if remaining_spots == 0:
                         break
-                    if player["salary"] <= remaining_cap:
-                        selected.append(player["player_id"])
-                        remaining_cap -= int(player["salary"])
-                        remaining_spots -= 1
+                    
+                    # Find eligible
+                    if "/" in pos_str:
+                        pos_options = pos_str.split("/")
+                        eligible = available[
+                            available["positions"].apply(
+                                lambda x: any(p in str(x).upper() for p in pos_options)
+                            )
+                        ].copy()
+                    else:
+                        eligible = available[
+                            available["positions"].str.contains(pos_str, case=False, na=False)
+                        ].copy()
+                    
+                    if eligible.empty:
+                        continue
+                    
+                    # Smart scoring
+                    if priority == "must":
+                        eligible["pick_score"] = (
+                            eligible["value"] * 15 +
+                            eligible["ceiling"] * 0.3 +
+                            (50 - eligible["own"]) * 0.5
+                        )
+                    else:
+                        eligible["pick_score"] = (
+                            eligible["ceiling"] * 0.5 +
+                            eligible["leverage"] * 1.5 +
+                            (100 - eligible["own"]) * 0.3 +
+                            rng.normal(0, 5, len(eligible))
+                        )
+                    
+                    eligible = eligible[eligible["salary"] <= remaining_cap]
+                    if eligible.empty:
+                        continue
+                    
+                    eligible = eligible.sort_values("pick_score", ascending=False)
+                    chosen = eligible.iloc[0]
+                    
+                    selected.append(chosen["player_id"])
+                    remaining_cap -= int(chosen["salary"])
+                    remaining_spots -= 1
+                    available = available[available["player_id"] != chosen["player_id"]]
+    
+    # PHASE 4: FILL REMAINING WITH VALUE/CONTRARIAN MIX
+    if remaining_spots > 0:
+        available = pool[
+            (~pool["player_id"].isin(selected)) &
+            (~pool["player_id"].isin(excludes))
+        ].copy()
+        
+        if not available.empty:
+            # Calculate spend rate
+            spent_pct = (config.salary_cap - remaining_cap) / config.salary_cap
+            
+            # If we've spent >85%, look for value/punts
+            if spent_pct > 0.85:
+                available["fill_score"] = (
+                    available["value"] * 20 +
+                    available["proj"] * 0.5 +
+                    (50 - available["own"]) * 0.3
+                )
+            # Otherwise, look for upside
+            else:
+                available["fill_score"] = (
+                    available["ceiling"] * 0.6 +
+                    available["leverage"] * 1.2 +
+                    (100 - available["own"]) * 0.2 +
+                    rng.normal(0, 8, len(available))
+                )
+            
+            available = available.sort_values("fill_score", ascending=False)
+            
+            for _, player in available.iterrows():
+                if remaining_spots == 0:
+                    break
+                if player["salary"] <= remaining_cap:
+                    selected.append(player["player_id"])
+                    remaining_cap -= int(player["salary"])
+                    remaining_spots -= 1
     
     if remaining_spots > 0:
         return None
@@ -781,7 +866,7 @@ def generate_contrarian_lineup(
         "own": total_own,
         "leverage": avg_leverage,
         "ceiling": total_ceiling,
-        "score": total_proj + avg_leverage * 0.5 + (config.roster_size * 100 - total_own) * 0.3
+        "score": total_ceiling * 0.5 + avg_leverage * 3 + (config.roster_size * 100 - total_own) * 0.2
     }
 
 
@@ -1297,30 +1382,34 @@ def main():
         for i, lu in enumerate(lineups, 1):
             summary_data.append({
                 "Lineup": i,
-                "Proj": lu["proj"],
                 "Ceil": lu["ceiling"],
+                "Proj": lu["proj"],
                 "Own%": lu["own"],
                 "Lev": lu["leverage"],
-                "Salary": lu["salary"]
+                "Salary": lu["salary"],
+                "Score": lu["score"]
             })
         
         summary_df = pd.DataFrame(summary_data)
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Avg Projection", f"{summary_df['Proj'].mean():.1f}")
+            st.metric("Avg Ceiling", f"{summary_df['Ceil'].mean():.1f}")
         with col2:
             st.metric("Avg Ownership", f"{summary_df['Own%'].mean():.1f}%")
         with col3:
             st.metric("Avg Leverage", f"{summary_df['Lev'].mean():.1f}")
+        with col4:
+            st.metric("Avg Salary", f"${summary_df['Salary'].mean():,.0f}")
         
         st.dataframe(
             summary_df.style.format({
-                "Proj": "{:.1f}",
                 "Ceil": "{:.1f}",
+                "Proj": "{:.1f}",
                 "Own%": "{:.1f}",
                 "Lev": "{:+.1f}",
-                "Salary": "${:,}"
+                "Salary": "${:,}",
+                "Score": "{:.1f}"
             }),
             use_container_width=True
         )
@@ -1329,7 +1418,7 @@ def main():
         st.markdown("---")
         st.subheader("Lineup Detail")
         
-        options = [f"Lineup {i} (Proj {lu['proj']:.1f}, Own {lu['own']:.1f}%)" 
+        options = [f"Lineup {i} (Ceil {lu['ceiling']:.1f}, Own {lu['own']:.1f}%, Lev {lu['leverage']:+.1f})" 
                    for i, lu in enumerate(lineups, 1)]
         choice = st.selectbox("Select lineup:", options)
         idx = options.index(choice)
