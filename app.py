@@ -86,9 +86,14 @@ def load_csv(uploaded_file):
             'minutes': 'minutes',
             'mins': 'minutes',
             'fppm': 'fppm',
-            'optimal_%': 'optimal_pct',
-            'leverage': 'leverage_raw'
+            'optimal_%': 'optimal_pct'
         }
+        
+        # Handle leverage separately (it might exist and conflict)
+        if 'leverage' in df.columns:
+            df['leverage_source'] = df['leverage'].astype(str).str.replace('%', '')
+            df['leverage_source'] = pd.to_numeric(df['leverage_source'], errors='coerce')
+            df = df.drop(columns=['leverage'])  # Remove original to avoid conflicts
         
         # Rename columns
         for old_col, new_col in column_map.items():
@@ -183,15 +188,10 @@ def calculate_metrics(df):
     # Ceiling (40% upside)
     df['ceiling'] = df['proj'] * 1.4
     
-    # Leverage - check if already exists and is numeric
-    if 'leverage_raw' in df.columns:
-        # It was cleaned already, just use it
-        df['leverage'] = df['leverage_raw']
-    elif 'leverage' in df.columns and pd.api.types.is_numeric_dtype(df['leverage']):
-        # Already numeric, keep it
-        pass
+    # Leverage - use source data if available, otherwise calculate
+    if 'leverage_source' in df.columns:
+        df['leverage'] = df['leverage_source']
     else:
-        # Calculate from ownership
         df['leverage'] = 100 - df['own']
     
     # GPP Score
@@ -275,7 +275,7 @@ def categorize_players(df):
 # LINEUP GENERATION
 # ============================================================================
 
-def generate_lineups(df, sport, n_lineups, locks, excludes, strategy="balanced"):
+def generate_lineups(df, sport, n_lineups, locks, excludes, strategy="balanced", weights=None):
     """Generate optimized lineups."""
     
     lineups = []
@@ -283,7 +283,7 @@ def generate_lineups(df, sport, n_lineups, locks, excludes, strategy="balanced")
     config = SPORT_CONFIGS[sport]
     
     for i in range(n_lineups):
-        lineup = build_single_lineup(df, sport, locks, excludes, strategy, rng, config)
+        lineup = build_single_lineup(df, sport, locks, excludes, strategy, weights, rng, config)
         if lineup:
             lineups.append(lineup)
     
@@ -292,32 +292,51 @@ def generate_lineups(df, sport, n_lineups, locks, excludes, strategy="balanced")
     
     return lineups
 
-def build_single_lineup(df, sport, locks, excludes, strategy, rng, config):
+def build_single_lineup(df, sport, locks, excludes, strategy, weights, rng, config):
     """Build one lineup."""
     
     available = df[~df["player_id"].isin(excludes)].copy()
     selected = list(locks)
     salary_used = df[df["player_id"].isin(selected)]["salary"].sum()
     
-    # Strategy weights
-    if strategy == "contrarian":
-        own_penalty = -0.5
-        value_weight = 0.4
-        ceiling_weight = 0.4
-        target_contrarian = 3
-        max_chalk = 1
-    elif strategy == "aggressive":
-        own_penalty = -0.2
-        value_weight = 0.2
-        ceiling_weight = 0.5
-        target_contrarian = 1
-        max_chalk = 3
-    else:  # balanced
+    # Use provided weights or default
+    if weights:
+        own_penalty = weights['own_penalty']
+        value_weight = weights['value']
+        ceiling_weight = weights['ceiling']
+        floor_weight = weights.get('floor', 0.3)
+    else:
+        # Default balanced weights
         own_penalty = -0.3
         value_weight = 0.3
         ceiling_weight = 0.3
+        floor_weight = 0.3
+    
+    # Strategy-based targets
+    if strategy == "cash":
+        target_contrarian = 0
+        max_chalk = 4
+    elif strategy == "extreme_contrarian":
+        target_contrarian = 4
+        max_chalk = 1
+    elif strategy == "heavy_contrarian":
+        target_contrarian = 3
+        max_chalk = 1
+    elif strategy in ["balanced_gpp", "balanced"]:
         target_contrarian = 2
         max_chalk = 2
+    elif strategy == "boom_bust":
+        target_contrarian = 2
+        max_chalk = 2
+    elif strategy == "high_floor_gpp":
+        target_contrarian = 1
+        max_chalk = 2
+    elif strategy == "h2h":
+        target_contrarian = 1
+        max_chalk = 2
+    else:  # aggressive
+        target_contrarian = 1
+        max_chalk = 3
     
     contrarian_count = 0
     chalk_count = 0
@@ -353,9 +372,10 @@ def build_single_lineup(df, sport, locks, excludes, strategy, rng, config):
         # Score
         candidates['score'] = (
             candidates['ceiling'] * ceiling_weight +
+            candidates['proj'] * floor_weight +  # Projection represents floor
             candidates['value'] * 10 * value_weight +
             candidates['own'] * own_penalty +
-            candidates['gpp_score'] * 0.2 +
+            candidates['gpp_score'] * 0.15 +
             rng.uniform(0, 15, size=len(candidates))
         ) * boost
         
@@ -527,23 +547,190 @@ with tab1:
                     else:
                         st.info("No mega-chalk (50%+) detected")
             
-            # Settings
+            # Contest-Based Settings
             st.markdown("---")
-            st.subheader("⚙️ Builder Settings")
+            st.subheader("⚙️ Contest Settings")
             
             col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                contest_type = st.selectbox(
+                    "Contest Type",
+                    ["GPP (Tournament)", "Cash Game (Double-Up)", "50/50", "Head-to-Head"],
+                    help="Type of contest you're entering"
+                )
+            
+            with col2:
+                entry_fee = st.selectbox(
+                    "Entry Fee",
+                    ["$0.25", "$1", "$3", "$5", "$10", "$25", "$50", "$100+"],
+                    index=2
+                )
+            
+            with col3:
+                contest_size = st.selectbox(
+                    "Contest Size",
+                    ["Small (3-20)", "Medium (20-100)", "Large (100-1000)", "Massive (1000+)"],
+                    index=1
+                )
+            
+            # Auto-generate strategy based on contest
+            def get_contest_strategy(contest_type, entry_fee, contest_size):
+                """Smart strategy based on contest parameters."""
+                
+                # Extract fee value
+                fee_value = float(entry_fee.replace('$', '').replace('+', '').split('-')[0])
+                
+                # Determine strategy
+                if contest_type == "Cash Game (Double-Up)" or contest_type == "50/50":
+                    return {
+                        "strategy": "cash",
+                        "target_own": "35-45%",
+                        "description": "Safe, High-Floor Build",
+                        "contrarian": 0,
+                        "mid": 6,
+                        "chalk": 2,
+                        "focus": "Maximize floor, minimize variance",
+                        "weights": {
+                            "own_penalty": -0.1,
+                            "value": 0.4,
+                            "ceiling": 0.2,
+                            "floor": 0.4
+                        }
+                    }
+                
+                elif contest_type == "Head-to-Head":
+                    return {
+                        "strategy": "h2h",
+                        "target_own": "30-40%",
+                        "description": "Balanced High-Floor",
+                        "contrarian": 1,
+                        "mid": 5,
+                        "chalk": 2,
+                        "focus": "Beat one opponent, high consistency",
+                        "weights": {
+                            "own_penalty": -0.2,
+                            "value": 0.35,
+                            "ceiling": 0.25,
+                            "floor": 0.4
+                        }
+                    }
+                
+                else:  # GPP
+                    # Adjust based on size and stakes
+                    if "Massive" in contest_size:
+                        # Massive GPPs need extreme differentiation
+                        return {
+                            "strategy": "extreme_contrarian",
+                            "target_own": "18-25%",
+                            "description": "Ultra Contrarian Boom/Bust",
+                            "contrarian": 4,
+                            "mid": 3,
+                            "chalk": 1,
+                            "focus": "Maximum leverage, stand out from field",
+                            "weights": {
+                                "own_penalty": -0.6,
+                                "value": 0.3,
+                                "ceiling": 0.5,
+                                "floor": 0.2
+                            }
+                        }
+                    
+                    elif "Large" in contest_size:
+                        # Large GPPs need strong differentiation
+                        return {
+                            "strategy": "heavy_contrarian",
+                            "target_own": "22-28%",
+                            "description": "Heavy Contrarian with Upside",
+                            "contrarian": 3,
+                            "mid": 4,
+                            "chalk": 1,
+                            "focus": "Strong leverage + ceiling",
+                            "weights": {
+                                "own_penalty": -0.5,
+                                "value": 0.3,
+                                "ceiling": 0.45,
+                                "floor": 0.25
+                            }
+                        }
+                    
+                    elif "Medium" in contest_size:
+                        # Medium GPPs - balanced contrarian
+                        return {
+                            "strategy": "balanced_gpp",
+                            "target_own": "25-32%",
+                            "description": "Balanced GPP Mix",
+                            "contrarian": 2,
+                            "mid": 4,
+                            "chalk": 2,
+                            "focus": "Good leverage with stability",
+                            "weights": {
+                                "own_penalty": -0.35,
+                                "value": 0.3,
+                                "ceiling": 0.4,
+                                "floor": 0.3
+                            }
+                        }
+                    
+                    else:  # Small
+                        # Small GPPs - can play safer
+                        if fee_value >= 25:
+                            # High stakes small field
+                            return {
+                                "strategy": "high_floor_gpp",
+                                "target_own": "28-35%",
+                                "description": "High-Floor GPP Build",
+                                "contrarian": 1,
+                                "mid": 5,
+                                "chalk": 2,
+                                "focus": "Ceiling with safety",
+                                "weights": {
+                                    "own_penalty": -0.25,
+                                    "value": 0.35,
+                                    "ceiling": 0.35,
+                                    "floor": 0.3
+                                }
+                            }
+                        else:
+                            # Low stakes small field - lottery ticket
+                            return {
+                                "strategy": "boom_bust",
+                                "target_own": "22-30%",
+                                "description": "Boom/Bust Upside",
+                                "contrarian": 2,
+                                "mid": 4,
+                                "chalk": 2,
+                                "focus": "Maximum ceiling potential",
+                                "weights": {
+                                    "own_penalty": -0.4,
+                                    "value": 0.25,
+                                    "ceiling": 0.5,
+                                    "floor": 0.25
+                                }
+                            }
+            
+            strategy_config = get_contest_strategy(contest_type, entry_fee, contest_size)
+            
+            # Show recommendation
+            st.info(f"""
+            **📊 Recommended Strategy: {strategy_config['description']}**
+            
+            **Target Mix:**
+            - Contrarian (<15%): {strategy_config['contrarian']} players
+            - Mid Ownership (15-30%): {strategy_config['mid']} players
+            - Popular/Chalk (30%+): {strategy_config['chalk']} players
+            
+            **Average Ownership:** {strategy_config['target_own']}
+            
+            **Focus:** {strategy_config['focus']}
+            """)
+            
+            col1, col2 = st.columns(2)
             
             with col1:
                 n_lineups = st.number_input("# Lineups", 1, 150, 20, help="Number of lineups to generate")
             
             with col2:
-                strategy = st.selectbox(
-                    "Strategy",
-                    ["balanced", "contrarian", "aggressive"],
-                    help="Balanced: 25-35% avg\nContrarian: 20-30% avg\nAggressive: 30-40% avg"
-                )
-            
-            with col3:
                 min_proj = st.number_input("Min Projection", 0.0, 100.0, 0.0, 0.5, help="Filter players below this projection")
             
             # Player pool with filters
@@ -638,10 +825,13 @@ with tab1:
             # Generate button
             st.markdown("---")
             if st.button("🚀 Generate Lineups", type="primary", use_container_width=True):
-                with st.spinner(f"Generating {n_lineups} optimized lineups..."):
-                    lineups = generate_lineups(df, sport, n_lineups, locks, excludes, strategy)
+                with st.spinner(f"Generating {n_lineups} optimized lineups for {contest_type}..."):
+                    lineups = generate_lineups(
+                        df, sport, n_lineups, locks, excludes, 
+                        strategy_config['strategy'], strategy_config['weights']
+                    )
                     st.session_state.generated_lineups = lineups
-                    st.success(f"✅ Generated {len(lineups)} lineups!")
+                    st.success(f"✅ Generated {len(lineups)} {strategy_config['description']} lineups!")
                     st.rerun()
             
             # Display lineups
