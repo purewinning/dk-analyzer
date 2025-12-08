@@ -128,6 +128,28 @@ def load_csv(uploaded_file):
         else:
             df['own'] = 15.0
         
+        # Clean leverage if present (from your data)
+        if 'leverage_raw' in df.columns:
+            df['leverage_raw'] = df['leverage_raw'].astype(str).str.replace('%', '')
+            df['leverage_raw'] = pd.to_numeric(df['leverage_raw'], errors='coerce')
+        
+        # Clean optimal % if present
+        if 'optimal_pct' in df.columns:
+            df['optimal_pct'] = df['optimal_pct'].astype(str).str.replace('%', '')
+            df['optimal_pct'] = pd.to_numeric(df['optimal_pct'], errors='coerce')
+        
+        # Clean value if it's a raw column
+        if 'value_raw' in df.columns:
+            df['value_raw'] = pd.to_numeric(df['value_raw'], errors='coerce')
+        
+        # Clean minutes
+        if 'minutes' in df.columns:
+            df['minutes'] = pd.to_numeric(df['minutes'], errors='coerce')
+        
+        # Clean FPPM
+        if 'fppm' in df.columns:
+            df['fppm'] = pd.to_numeric(df['fppm'], errors='coerce')
+        
         # Drop rows with missing critical data
         before_drop = len(df)
         df = df.dropna(subset=['name', 'positions', 'salary', 'proj'])
@@ -161,11 +183,16 @@ def calculate_metrics(df):
     # Ceiling (40% upside)
     df['ceiling'] = df['proj'] * 1.4
     
-    # Leverage
-    if 'leverage_raw' not in df.columns:
-        df['leverage'] = 100 - df['own']
-    else:
+    # Leverage - check if already exists and is numeric
+    if 'leverage_raw' in df.columns:
+        # It was cleaned already, just use it
         df['leverage'] = df['leverage_raw']
+    elif 'leverage' in df.columns and pd.api.types.is_numeric_dtype(df['leverage']):
+        # Already numeric, keep it
+        pass
+    else:
+        # Calculate from ownership
+        df['leverage'] = 100 - df['own']
     
     # GPP Score
     df['gpp_score'] = (
