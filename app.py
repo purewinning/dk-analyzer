@@ -491,6 +491,10 @@ def validate_position_requirements(lineup_df: pd.DataFrame, sport: Sport) -> boo
     if not config:
         return False
     
+    # Must have exactly the right number of players
+    if len(lineup_df) != config.roster_size:
+        return False
+    
     position_counts = defaultdict(int)
     
     for _, player in lineup_df.iterrows():
@@ -503,12 +507,22 @@ def validate_position_requirements(lineup_df: pd.DataFrame, sport: Sport) -> boo
     
     # Check requirements based on sport
     if sport == Sport.NBA:
+        # Need at least 1 of each primary position
+        # Plus extras for G/F/UTIL
+        has_pg = position_counts.get("PG", 0) >= 1
+        has_sg = position_counts.get("SG", 0) >= 1
+        has_sf = position_counts.get("SF", 0) >= 1
+        has_pf = position_counts.get("PF", 0) >= 1
+        has_c = position_counts.get("C", 0) >= 1
+        
+        # Need extra guards and forwards for G/F slots
+        total_guards = position_counts.get("PG", 0) + position_counts.get("SG", 0)
+        total_forwards = position_counts.get("SF", 0) + position_counts.get("PF", 0)
+        
         return all([
-            position_counts.get("PG", 0) >= 1,
-            position_counts.get("SG", 0) >= 1,
-            position_counts.get("SF", 0) >= 1,
-            position_counts.get("PF", 0) >= 1,
-            position_counts.get("C", 0) >= 1,
+            has_pg, has_sg, has_sf, has_pf, has_c,
+            total_guards >= 3,  # PG + SG + G
+            total_forwards >= 3  # SF + PF + F
         ])
     
     elif sport == Sport.NFL:
@@ -759,19 +773,48 @@ def assign_positions(lineup_df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
             assigned.add(chosen["player_id"])
     
     elif sport == Sport.NBA:
-        # NBA order: C, PG, SG, SF, PF, G, F, UTIL
-        slot_order = ["C", "PG", "SG", "SF", "PF", "G", "F", "UTIL"]
+        # NBA order: PG, SG, SF, PF, C, G, F, UTIL (all 8 must be filled!)
+        slot_order = ["PG", "SG", "SF", "PF", "C", "G", "F", "UTIL"]
         
         for slot in slot_order:
             available = lineup_df[~lineup_df["player_id"].isin(assigned)]
-            eligible = available[
-                available["positions"].apply(lambda x: can_fill_position(x, slot, sport))
-            ]
+            
+            if available.empty:
+                st.error(f"❌ Cannot fill {slot} - no players available")
+                break
+            
+            # Filter to eligible players
+            def is_eligible_nba(pos_string):
+                if pd.isna(pos_string):
+                    return False
+                positions = [p.strip().upper() for p in str(pos_string).split("/")]
+                
+                if slot == "PG":
+                    return "PG" in positions
+                elif slot == "SG":
+                    return "SG" in positions
+                elif slot == "SF":
+                    return "SF" in positions
+                elif slot == "PF":
+                    return "PF" in positions
+                elif slot == "C":
+                    return "C" in positions
+                elif slot == "G":
+                    return "PG" in positions or "SG" in positions
+                elif slot == "F":
+                    return "SF" in positions or "PF" in positions
+                elif slot == "UTIL":
+                    return True  # Any position
+                return False
+            
+            eligible = available[available["positions"].apply(is_eligible_nba)]
             
             if eligible.empty:
-                continue
+                st.error(f"❌ No eligible players for {slot}")
+                st.error(f"Available positions: {available['positions'].tolist()}")
+                break
             
-            # Pick least flexible for specific positions
+            # Pick least flexible for specific positions (PG/SG/SF/PF/C)
             if slot not in ["G", "F", "UTIL"]:
                 eligible = eligible.copy()
                 eligible["flexibility"] = eligible["positions"].apply(
@@ -779,6 +822,7 @@ def assign_positions(lineup_df: pd.DataFrame, sport: Sport) -> pd.DataFrame:
                 )
                 eligible = eligible.sort_values("flexibility")
             
+            # Assign first eligible player
             chosen = eligible.iloc[0]
             assignments[chosen["player_id"]] = slot
             assigned.add(chosen["player_id"])
@@ -1110,7 +1154,7 @@ def main():
         lineup_df = pool[pool["player_id"].isin(chosen["player_ids"])]
         lineup_df = assign_positions(lineup_df, sport)
         
-        # Validate position counts for NFL
+        # Validate position counts
         if sport == Sport.NFL:
             slot_counts = lineup_df["slot"].value_counts()
             
@@ -1139,6 +1183,45 @@ def main():
                 slot_counts.get("TE", 0) == 1 and
                 slot_counts.get("FLEX", 0) == 1 and
                 slot_counts.get("DST", 0) == 1
+            )
+            
+            if not is_valid:
+                st.error("⚠️ This lineup has invalid position assignments! Regenerating may help.")
+        
+        elif sport == Sport.NBA:
+            slot_counts = lineup_df["slot"].value_counts()
+            
+            st.caption("Position Breakdown:")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("PG", slot_counts.get("PG", 0), delta="Need 1", delta_color="off" if slot_counts.get("PG", 0) == 1 else "inverse")
+            with col2:
+                st.metric("SG", slot_counts.get("SG", 0), delta="Need 1", delta_color="off" if slot_counts.get("SG", 0) == 1 else "inverse")
+            with col3:
+                st.metric("SF", slot_counts.get("SF", 0), delta="Need 1", delta_color="off" if slot_counts.get("SF", 0) == 1 else "inverse")
+            with col4:
+                st.metric("PF", slot_counts.get("PF", 0), delta="Need 1", delta_color="off" if slot_counts.get("PF", 0) == 1 else "inverse")
+            with col5:
+                st.metric("C", slot_counts.get("C", 0), delta="Need 1", delta_color="off" if slot_counts.get("C", 0) == 1 else "inverse")
+            
+            col6, col7, col8 = st.columns(3)
+            with col6:
+                st.metric("G", slot_counts.get("G", 0), delta="Need 1", delta_color="off" if slot_counts.get("G", 0) == 1 else "inverse")
+            with col7:
+                st.metric("F", slot_counts.get("F", 0), delta="Need 1", delta_color="off" if slot_counts.get("F", 0) == 1 else "inverse")
+            with col8:
+                st.metric("UTIL", slot_counts.get("UTIL", 0), delta="Need 1", delta_color="off" if slot_counts.get("UTIL", 0) == 1 else "inverse")
+            
+            # Check if valid
+            is_valid = (
+                slot_counts.get("PG", 0) == 1 and
+                slot_counts.get("SG", 0) == 1 and
+                slot_counts.get("SF", 0) == 1 and
+                slot_counts.get("PF", 0) == 1 and
+                slot_counts.get("C", 0) == 1 and
+                slot_counts.get("G", 0) == 1 and
+                slot_counts.get("F", 0) == 1 and
+                slot_counts.get("UTIL", 0) == 1
             )
             
             if not is_valid:
