@@ -605,47 +605,165 @@ def generate_contrarian_lineup(
                             remaining_spots -= 1
     
     # Fill remaining with contrarian + value
+    # BUT ensure position requirements can be met!
     available = pool[
         (~pool["player_id"].isin(selected)) &
         (~pool["player_id"].isin(excludes))
     ].copy()
     
     if remaining_spots > 0 and not available.empty:
-        # Score players: favor low ownership + high value
-        available["selection_score"] = (
-            available["gpp_score"] * 0.6 +
-            (100 - available["own"]) * 0.4 +  # Contrarian bonus
-            rng.normal(0, 10, len(available))  # Randomness
-        )
+        # Check what positions we still need
+        selected_df = pool[pool["player_id"].isin(selected)]
         
-        # Avoid mega-chalk
-        available = available[available["own"] < 40]
+        if sport == Sport.NBA:
+            # Count what we have
+            pos_counts = {"PG": 0, "SG": 0, "SF": 0, "PF": 0, "C": 0}
+            for _, player in selected_df.iterrows():
+                for pos in str(player["positions"]).upper().split("/"):
+                    pos = pos.strip()
+                    if pos in pos_counts:
+                        pos_counts[pos] += 1
+            
+            # Calculate what we need (minimum)
+            guards_needed = max(0, 3 - (pos_counts["PG"] + pos_counts["SG"]))
+            forwards_needed = max(0, 3 - (pos_counts["SF"] + pos_counts["PF"]))
+            centers_needed = max(0, 1 - pos_counts["C"])
+            
+            # Prioritize filling position gaps
+            priority_positions = []
+            if centers_needed > 0:
+                priority_positions.extend(["C"] * centers_needed)
+            if forwards_needed > 0:
+                priority_positions.extend(["SF", "PF", "SF/PF"] * forwards_needed)
+            if guards_needed > 0:
+                priority_positions.extend(["PG", "SG", "PG/SG"] * guards_needed)
+            
+            # Fill priority positions first
+            for priority_pos in priority_positions:
+                if remaining_spots == 0:
+                    break
+                
+                # Find players with this position
+                priority_players = available[
+                    available["positions"].str.contains(priority_pos, case=False, na=False, regex=False)
+                ]
+                
+                if not priority_players.empty:
+                    # Score and pick best
+                    priority_players = priority_players.copy()
+                    priority_players["selection_score"] = (
+                        priority_players["gpp_score"] * 0.6 +
+                        (100 - priority_players["own"]) * 0.4 +
+                        rng.normal(0, 10, len(priority_players))
+                    )
+                    priority_players = priority_players.sort_values("selection_score", ascending=False)
+                    
+                    for _, player in priority_players.iterrows():
+                        if remaining_spots == 0:
+                            break
+                        if player["salary"] <= remaining_cap:
+                            selected.append(player["player_id"])
+                            remaining_cap -= int(player["salary"])
+                            remaining_spots -= 1
+                            available = available[available["player_id"] != player["player_id"]]
+                            break
         
-        if available.empty:
-            # If too restrictive, allow chalk but penalize
+        elif sport == Sport.NFL:
+            # Count what we have
+            pos_counts = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "DST": 0}
+            for _, player in selected_df.iterrows():
+                for pos in str(player["positions"]).upper().split("/"):
+                    pos = pos.strip()
+                    if pos in pos_counts:
+                        pos_counts[pos] += 1
+                    if pos == "DEF":
+                        pos_counts["DST"] += 1
+            
+            # Calculate what we need
+            qb_needed = max(0, 1 - pos_counts["QB"])
+            rb_needed = max(0, 2 - pos_counts["RB"])
+            wr_needed = max(0, 3 - pos_counts["WR"])
+            te_needed = max(0, 1 - pos_counts["TE"])
+            dst_needed = max(0, 1 - pos_counts["DST"])
+            
+            # Fill priority positions
+            priority_positions = []
+            if qb_needed > 0:
+                priority_positions.extend(["QB"] * qb_needed)
+            if dst_needed > 0:
+                priority_positions.extend(["DST"] * dst_needed)
+            if te_needed > 0:
+                priority_positions.extend(["TE"] * te_needed)
+            if rb_needed > 0:
+                priority_positions.extend(["RB"] * rb_needed)
+            if wr_needed > 0:
+                priority_positions.extend(["WR"] * wr_needed)
+            
+            for priority_pos in priority_positions:
+                if remaining_spots == 0:
+                    break
+                
+                priority_players = available[
+                    available["positions"].str.contains(priority_pos, case=False, na=False, regex=False)
+                ]
+                
+                if not priority_players.empty:
+                    priority_players = priority_players.copy()
+                    priority_players["selection_score"] = (
+                        priority_players["gpp_score"] * 0.6 +
+                        (100 - priority_players["own"]) * 0.4 +
+                        rng.normal(0, 10, len(priority_players))
+                    )
+                    priority_players = priority_players.sort_values("selection_score", ascending=False)
+                    
+                    for _, player in priority_players.iterrows():
+                        if remaining_spots == 0:
+                            break
+                        if player["salary"] <= remaining_cap:
+                            selected.append(player["player_id"])
+                            remaining_cap -= int(player["salary"])
+                            remaining_spots -= 1
+                            available = available[available["player_id"] != player["player_id"]]
+                            break
+        
+        # Fill any remaining spots with best available
+        if remaining_spots > 0:
             available = pool[
                 (~pool["player_id"].isin(selected)) &
                 (~pool["player_id"].isin(excludes))
             ].copy()
-            available["selection_score"] = available["gpp_score"]
-        
-        available = available.sort_values("selection_score", ascending=False)
-        
-        # Greedy fill
-        for _, player in available.iterrows():
-            if remaining_spots == 0:
-                break
-            if player["salary"] <= remaining_cap:
-                selected.append(player["player_id"])
-                remaining_cap -= int(player["salary"])
-                remaining_spots -= 1
+            
+            if not available.empty:
+                # Score players: favor low ownership + high value
+                available["selection_score"] = (
+                    available["gpp_score"] * 0.6 +
+                    (100 - available["own"]) * 0.4 +
+                    rng.normal(0, 10, len(available))
+                )
+                
+                # Avoid mega-chalk
+                available_filtered = available[available["own"] < 40]
+                if available_filtered.empty:
+                    available_filtered = available
+                
+                available_filtered = available_filtered.sort_values("selection_score", ascending=False)
+                
+                # Greedy fill
+                for _, player in available_filtered.iterrows():
+                    if remaining_spots == 0:
+                        break
+                    if player["salary"] <= remaining_cap:
+                        selected.append(player["player_id"])
+                        remaining_cap -= int(player["salary"])
+                        remaining_spots -= 1
     
     if remaining_spots > 0:
         return None
     
-    # Validate
+    # Build lineup dataframe for validation
     lineup_df = pool[pool["player_id"].isin(selected)]
     
+    # CRITICAL: Validate position requirements BEFORE returning
     if not validate_position_requirements(lineup_df, sport):
         return None
     
@@ -1096,7 +1214,73 @@ def main():
             )
         
         if not lineups:
-            st.error("❌ Could not generate lineups. Try adjusting locks/excludes or correlation.")
+            st.error("❌ Could not generate lineups with current settings.")
+            
+            # Diagnose the issue
+            st.warning("**Possible issues:**")
+            
+            # Check position distribution
+            if sport == Sport.NBA:
+                pos_counts = {"PG": 0, "SG": 0, "SF": 0, "PF": 0, "C": 0}
+                for _, player in pool.iterrows():
+                    for pos in str(player["positions"]).upper().split("/"):
+                        pos = pos.strip()
+                        if pos in pos_counts:
+                            pos_counts[pos] += 1
+                
+                col1, col2, col3, col4, col5 = st.columns(5)
+                with col1:
+                    status = "✅" if pos_counts["PG"] >= 3 else "❌"
+                    st.metric(f"{status} PG", pos_counts["PG"], delta=f"Need 3+")
+                with col2:
+                    status = "✅" if pos_counts["SG"] >= 3 else "❌"
+                    st.metric(f"{status} SG", pos_counts["SG"], delta=f"Need 3+")
+                with col3:
+                    status = "✅" if pos_counts["SF"] >= 3 else "❌"
+                    st.metric(f"{status} SF", pos_counts["SF"], delta=f"Need 3+")
+                with col4:
+                    status = "✅" if pos_counts["PF"] >= 3 else "❌"
+                    st.metric(f"{status} PF", pos_counts["PF"], delta=f"Need 3+")
+                with col5:
+                    status = "✅" if pos_counts["C"] >= 1 else "❌"
+                    st.metric(f"{status} C", pos_counts["C"], delta=f"Need 1+")
+                
+                st.info("NBA needs: 3+ PG, 3+ SG, 3+ SF, 3+ PF, 1+ C")
+            
+            elif sport == Sport.NFL:
+                pos_counts = {"QB": 0, "RB": 0, "WR": 0, "TE": 0, "DST": 0}
+                for _, player in pool.iterrows():
+                    for pos in str(player["positions"]).upper().split("/"):
+                        pos = pos.strip()
+                        if pos in pos_counts:
+                            pos_counts[pos] += 1
+                        if pos == "DEF":
+                            pos_counts["DST"] += 1
+                
+                col1, col2, col3, col4, col5 = st.columns(5)
+                with col1:
+                    status = "✅" if pos_counts["QB"] >= 1 else "❌"
+                    st.metric(f"{status} QB", pos_counts["QB"], delta=f"Need 1+")
+                with col2:
+                    status = "✅" if pos_counts["RB"] >= 2 else "❌"
+                    st.metric(f"{status} RB", pos_counts["RB"], delta=f"Need 2+")
+                with col3:
+                    status = "✅" if pos_counts["WR"] >= 3 else "❌"
+                    st.metric(f"{status} WR", pos_counts["WR"], delta=f"Need 3+")
+                with col4:
+                    status = "✅" if pos_counts["TE"] >= 1 else "❌"
+                    st.metric(f"{status} TE", pos_counts["TE"], delta=f"Need 1+")
+                with col5:
+                    status = "✅" if pos_counts["DST"] >= 1 else "❌"
+                    st.metric(f"{status} DST", pos_counts["DST"], delta=f"Need 1+")
+                
+                st.info("NFL needs: 1+ QB, 2+ RB, 3+ WR, 1+ TE, 1+ DST")
+            
+            st.markdown("**Try:**")
+            st.markdown("- Unlock some players")
+            st.markdown("- Lower correlation strength")
+            st.markdown("- Remove some excludes")
+            st.markdown("- Adjust edge tier filters to include more players")
         else:
             st.session_state.lineups = lineups
             st.success(f"✅ Generated {len(lineups)} lineups")
