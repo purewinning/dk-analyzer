@@ -549,8 +549,8 @@ if uploaded_file:
         # Summary
         summary = pd.DataFrame([{
             "Lineup": i+1,
-            "Ceiling": lu["ceiling"],
             "Proj": lu["proj"],
+            "Ceiling": lu["ceiling"],
             "Own": lu["own"],
             "Lev": lu["leverage"],
             "Game": lu["game_env"],
@@ -559,35 +559,113 @@ if uploaded_file:
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Avg Ceiling", f"{summary['Ceiling'].mean():.1f}")
+            st.metric("Avg Projection", f"{summary['Proj'].mean():.1f}")
         with col2:
-            st.metric("Avg Own", f"{summary['Own'].mean():.1f}%")
+            st.metric("Avg Ceiling", f"{summary['Ceiling'].mean():.1f}")
         with col3:
-            st.metric("Avg Lev", f"{summary['Lev'].mean():+.1f}")
+            st.metric("Avg Own", f"{summary['Own'].mean():.1f}%")
         with col4:
-            st.metric("Avg Game", f"{summary['Game'].mean():.0f}")
+            st.metric("Avg Leverage", f"{summary['Lev'].mean():+.1f}")
         
-        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.dataframe(
+            summary,
+            column_config={
+                "Lineup": st.column_config.NumberColumn("#", width="small"),
+                "Proj": st.column_config.NumberColumn("Proj", format="%.1f"),
+                "Ceiling": st.column_config.NumberColumn("Ceiling", format="%.1f"),
+                "Own": st.column_config.NumberColumn("Own%", format="%.1f%%"),
+                "Lev": st.column_config.NumberColumn("Lev", format="%+.1f"),
+                "Game": st.column_config.NumberColumn("Game Env", format="%.0f"),
+                "Sal": st.column_config.NumberColumn("Salary", format="$%d"),
+            },
+            use_container_width=True, 
+            hide_index=True
+        )
         
         # Detail
         st.markdown("---")
         choice = st.selectbox(
             "View lineup:",
-            [f"Lineup {i+1} (Ceil {lu['ceiling']:.0f}, Own {lu['own']:.0f}%)" 
+            [f"Lineup {i+1} (Proj {lu['proj']:.0f} | Ceil {lu['ceiling']:.0f} | Own {lu['own']:.0f}%)" 
              for i, lu in enumerate(lineups)]
         )
         
         idx = int(choice.split()[1]) - 1
         lineup = lineups[idx]
         
-        st.dataframe(
-            lineup["players"][[
-                "slot", "name", "positions", "team", 
-                "salary", "proj", "own", "ceiling", "game_env"
-            ]],
+        # Initialize session state for actuals if not exists
+        if f"actuals_{idx}" not in st.session_state:
+            st.session_state[f"actuals_{idx}"] = [0.0] * len(lineup["players"])
+        
+        # Display lineup with proj, ceiling, and actual
+        lineup_display = lineup["players"][[
+            "slot", "name", "positions", "team", 
+            "salary", "proj", "ceiling", "own", "game_env"
+        ]].copy()
+        
+        # Add actual column
+        lineup_display["actual"] = st.session_state[f"actuals_{idx}"]
+        
+        edited_lineup = st.data_editor(
+            lineup_display,
+            column_config={
+                "slot": st.column_config.TextColumn("Slot", width="small"),
+                "name": st.column_config.TextColumn("Player", width="medium"),
+                "positions": st.column_config.TextColumn("Pos", width="small"),
+                "team": st.column_config.TextColumn("Team", width="small"),
+                "salary": st.column_config.NumberColumn("Salary", format="$%d"),
+                "proj": st.column_config.NumberColumn("Proj", format="%.1f"),
+                "ceiling": st.column_config.NumberColumn("Ceil", format="%.1f"),
+                "own": st.column_config.NumberColumn("Own%", format="%.1f%%"),
+                "game_env": st.column_config.TextColumn("Game", width="small"),
+                "actual": st.column_config.NumberColumn("✏️ Actual", format="%.1f"),
+            },
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            disabled=["slot", "name", "positions", "team", "salary", "proj", "ceiling", "own", "game_env"]
         )
+        
+        # Update session state with edited actuals
+        st.session_state[f"actuals_{idx}"] = edited_lineup["actual"].tolist()
+        
+        # Calculate totals
+        total_proj = lineup['proj']
+        total_ceil = lineup['ceiling']
+        total_actual = edited_lineup["actual"].sum()
+        
+        # Show totals with comparison
+        st.markdown("### 📊 Lineup Totals")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Projection", f"{total_proj:.1f}")
+        with col2:
+            diff_ceil = total_actual - total_ceil if total_actual > 0 else 0
+            st.metric("Ceiling", f"{total_ceil:.1f}", 
+                     delta=f"{diff_ceil:+.1f} vs actual" if total_actual > 0 else None)
+        with col3:
+            diff_proj = total_actual - total_proj if total_actual > 0 else 0
+            st.metric("Actual", f"{total_actual:.1f}",
+                     delta=f"{diff_proj:+.1f} vs proj" if total_actual > 0 else None)
+        with col4:
+            st.metric("Ownership", f"{lineup['own']:.0f}%")
+        
+        # Performance analysis if actuals entered
+        if total_actual > 0:
+            st.markdown("### 🎯 Performance Analysis")
+            
+            hit_rate = (edited_lineup["actual"] >= edited_lineup["proj"]).sum() / len(edited_lineup) * 100
+            ceiling_rate = (edited_lineup["actual"] >= edited_lineup["ceiling"] * 0.8).sum() / len(edited_lineup) * 100
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Hit Rate", f"{hit_rate:.0f}%", 
+                         help="% of players that hit projection")
+            with col2:
+                st.metric("Ceiling Rate", f"{ceiling_rate:.0f}%",
+                         help="% of players within 20% of ceiling")
+            with col3:
+                roi = ((total_actual - total_proj) / total_proj * 100) if total_proj > 0 else 0
+                st.metric("ROI vs Proj", f"{roi:+.1f}%")
         
         # Export
         if st.button("💾 Export All Lineups"):
